@@ -206,3 +206,11 @@ Tradeoff: cloning the library per layout/realize call is cheap (modules and styl
 - Heading presentation keys treat sequences and `SymbolElem` leaves as transparent. `= A --- B` realizes as a sequence with a symbol leaf, `= A` as a single text leaf; re-chunking plain text is not a presentation change and no longer forces a context-split replacement.
 
 Tradeoff: headings whose presentation really changes (corpus 44, a changed heading show rule) now consistently take the context-split path (old display struck, new display inserted) for every heading, where previously only the first heading of the document had an owner at all and the others fell back to word replacement. This follows the "formatting changes count as edits" design but changes the rendering of that corpus case.
+
+## Images Compare By Data, Not By Load Span
+
+- `ImageElem::source` is a `Derived<DataSource, Loaded>`, and `Loaded::source` is a `Spanned<LoadSource>` whose span points into the calling document. Old and new are separate source files, so an unchanged image never compared equal and became an opaque old/new replacement (every image in a `--revision` diff).
+- The evaluated pre-realization tree of each document is normalized after list-item grouping: every image reachable through the structured children (`container_ops::realized_child_contents`) gets a detached load span. Realization is shallow, so images nested in figures, boxes or tables stay unrealized inside block bodies and are only reached this way.
+- Images created by show rules during realization pass through a wrapper around Typst's built-in paged image rule in the diff library: it detaches the load span and delegates to the built-in rule (fetched from the library's `NativeRuleMap`, since `IMAGE_RULE` is private to `typst-layout`).
+
+Tradeoff: image decoding diagnostics raised while laying out the annotated document no longer point at the `image(...)` call. Load errors are still reported with their location during evaluation, before the span is detached. Images created inside show-rule output below the top level of that output keep their span and can still be reported as changed.

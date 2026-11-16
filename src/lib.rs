@@ -25,6 +25,7 @@ pub mod debug;
 pub mod diag;
 pub mod diff;
 pub mod eval;
+mod image_identity;
 mod normalize;
 pub mod render;
 pub mod trace;

@@ -47,6 +47,7 @@ use crate::normalize::normalize_list_item_runs;
 fn diff_library(world: &dyn World) -> LazyHash<Library> {
     let mut library = Library::clone(world.library());
     crate::context_recording::install_recording_context_rule(&mut library.rules);
+    crate::image_identity::install_span_free_image_rule(&mut library.rules);
     LazyHash::new(library)
 }
 
@@ -173,10 +174,14 @@ struct EvalPipeline {
     annotated: crate::annotated::AnnotatedContent,
 }
 
+fn normalize_pre_tree(raw: Content) -> Content {
+    crate::image_identity::detach_image_load_spans(normalize_list_item_runs(raw))
+}
+
 fn eval_realized_pipeline(world: &dyn World, capture_debug: bool) -> Result<EvalPipeline> {
     let raw = eval_to_content(world)?;
     if capture_debug {
-        let normalized = normalize_list_item_runs(raw.clone());
+        let normalized = normalize_pre_tree(raw.clone());
         let annotated = realize_and_annotate(world, &normalized)?;
         Ok(EvalPipeline {
             raw: Some(raw),
@@ -184,7 +189,7 @@ fn eval_realized_pipeline(world: &dyn World, capture_debug: bool) -> Result<Eval
             annotated,
         })
     } else {
-        let normalized = normalize_list_item_runs(raw);
+        let normalized = normalize_pre_tree(raw);
         let annotated = realize_and_annotate(world, &normalized)?;
         Ok(EvalPipeline {
             raw: None,

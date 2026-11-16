@@ -6201,3 +6201,41 @@ fn template_prefix_content_keeps_body_structures_word_diffable() {
         );
     }
 }
+
+/// Old and new documents are different source files, so every span differs.
+/// An image loaded from the same unchanged file must still compare equal and
+/// must not be reported as an opaque old/new visual replacement.
+#[test]
+fn unchanged_image_in_separate_source_files_is_not_a_change() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::write(
+        dir.path().join("pic.svg"),
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10"><rect width="20" height="10" fill="teal"/></svg>"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("old.typ"),
+        "#image(\"pic.svg\", width: 2cm)\n\n#figure(image(\"pic.svg\", width: 2cm), caption: [Logo])\n\nText alt.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("new.typ"),
+        "#image(\"pic.svg\", width: 2cm)\n\n#figure(image(\"pic.svg\", width: 2cm), caption: [Logo])\n\nText.\n",
+    )
+    .unwrap();
+    let old_world = typst_diff::world::SystemWorld::new(dir.path().join("old.typ")).unwrap();
+    let new_world = typst_diff::world::SystemWorld::new(dir.path().join("new.typ")).unwrap();
+    let old = typst_diff::eval_to_realized_content(&old_world).unwrap();
+    let new = typst_diff::eval_to_realized_content(&new_world).unwrap();
+    let result = typst_diff::diff::diff_annotated(&old, &new);
+    let log = result.modification_log();
+    assert!(
+        !log.contains("[opaque visual content]"),
+        "unchanged image reported as changed:\n{log}"
+    );
+    let (deleted, _inserted) = collect_modified_word_texts(&result.blocks);
+    assert!(
+        deleted.contains("alt"),
+        "expected the text edit, got:\n{log}"
+    );
+}
