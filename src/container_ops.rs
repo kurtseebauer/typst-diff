@@ -10,7 +10,7 @@ use crate::annotated::{
     annotate_realized,
 };
 use crate::normalize::normalize_list_item_runs;
-use typst::foundations::{Content, Packed, SequenceElem, StyleChain, StyledElem, Styles};
+use typst::foundations::{Content, Packed, SequenceElem, Smart, StyleChain, StyledElem, Styles};
 use typst::layout::{
     AlignElem, BlockBody, BlockElem, BoxElem, ColumnsElem, GridCell, GridChild, GridElem, GridItem,
     PadElem, PlaceElem, StackChild, StackElem,
@@ -1591,6 +1591,96 @@ impl IndexedCellChild for GridChild {
             GridChild::Header(header) => IndexedCellItemsMut::Group(&mut header.children),
             GridChild::Footer(footer) => IndexedCellItemsMut::Group(&mut footer.children),
         }
+    }
+}
+
+/// Column count of the first table or grid in `content` whose cells form a
+/// plain row-major grid, so that consecutive runs of that many cell slots are
+/// rows: every cell spans one column and one row and has no explicit
+/// position, a header comes first and holds whole rows, and a footer follows
+/// whole body rows. Returns `None` for any other layout.
+pub(crate) fn plain_grid_columns(content: &Content) -> Option<usize> {
+    let styles = StyleChain::default();
+    if let Some(table) = content.to_packed::<TableElem>() {
+        let columns = table.columns.get_ref(styles).0.len().max(1);
+        let mut body = 0;
+        for child in &table.children {
+            match child {
+                TableChild::Item(item) => body += plain_table_item_cells(item)?,
+                TableChild::Header(header) => {
+                    let cells = header
+                        .children
+                        .iter()
+                        .map(plain_table_item_cells)
+                        .sum::<Option<usize>>()?;
+                    (body == 0 && cells % columns == 0).then_some(())?;
+                }
+                TableChild::Footer(footer) => {
+                    let cells = footer
+                        .children
+                        .iter()
+                        .map(plain_table_item_cells)
+                        .sum::<Option<usize>>()?;
+                    (body % columns == 0 && cells % columns == 0).then_some(())?;
+                }
+            }
+        }
+        return Some(columns);
+    }
+    if let Some(grid) = content.to_packed::<GridElem>() {
+        let columns = grid.columns.get_ref(styles).0.len().max(1);
+        let mut body = 0;
+        for child in &grid.children {
+            match child {
+                GridChild::Item(item) => body += plain_grid_item_cells(item)?,
+                GridChild::Header(header) => {
+                    let cells = header
+                        .children
+                        .iter()
+                        .map(plain_grid_item_cells)
+                        .sum::<Option<usize>>()?;
+                    (body == 0 && cells % columns == 0).then_some(())?;
+                }
+                GridChild::Footer(footer) => {
+                    let cells = footer
+                        .children
+                        .iter()
+                        .map(plain_grid_item_cells)
+                        .sum::<Option<usize>>()?;
+                    (body % columns == 0 && cells % columns == 0).then_some(())?;
+                }
+            }
+        }
+        return Some(columns);
+    }
+    realized_child_contents(content)
+        .iter()
+        .find_map(plain_grid_columns)
+}
+
+/// Number of plain cells in `item` (lines count as none), or `None` for a
+/// cell that spans or is placed explicitly.
+fn plain_table_item_cells(item: &TableItem) -> Option<usize> {
+    let styles = StyleChain::default();
+    match item {
+        TableItem::Cell(cell) => (cell.colspan.get(styles).get() == 1
+            && cell.rowspan.get(styles).get() == 1
+            && cell.x.get(styles) == Smart::Auto
+            && cell.y.get(styles) == Smart::Auto)
+            .then_some(1),
+        TableItem::HLine(_) | TableItem::VLine(_) => Some(0),
+    }
+}
+
+fn plain_grid_item_cells(item: &GridItem) -> Option<usize> {
+    let styles = StyleChain::default();
+    match item {
+        GridItem::Cell(cell) => (cell.colspan.get(styles).get() == 1
+            && cell.rowspan.get(styles).get() == 1
+            && cell.x.get(styles) == Smart::Auto
+            && cell.y.get(styles) == Smart::Auto)
+            .then_some(1),
+        GridItem::HLine(_) | GridItem::VLine(_) => Some(0),
     }
 }
 

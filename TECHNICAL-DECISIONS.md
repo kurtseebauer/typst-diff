@@ -225,3 +225,13 @@ Fixing template pairing exposed several older places where an owner reached the 
 - **Edit-zone ties.** Delete/insert pairing within an edit zone is greedy by text similarity. Text-empty blocks all score the same, and `max_by` picked the last insert, typically an introspection tag instead of the realized list. Ties now prefer an insert of the same innermost element kind, then the earliest one.
 
 Tradeoff: an inline source child that realized into an earlier paragraph no longer has a realized node of its own; its text is still carried by the paragraph that owns the realized surface. The element-kind tie-break only orders candidates that text similarity cannot distinguish.
+
+## Tables Are Diffed Row By Row
+
+- Same-shape slot diffs pair cells by position. In a table, an inserted or deleted row therefore became a cascade of shifted cell replacements down to the end of the table.
+- For table and grid owners whose cells form a plain row-major grid with the same column count on both sides (`container_ops::plain_grid_columns`: no spanning or explicitly placed cells, headers first and footers last with whole rows), the cell slots are grouped into rows and the rows are aligned with Myers on their cell match keys.
+- Inside a changed run, rows pair by similarity in document order (an LCS that maximizes the summed similarity of kept pairs; threshold 0.5). Row similarity is the share of identical cells or the text similarity of the whole row, whichever is higher. Unpaired deleted and inserted rows between the same two paired rows pair in order as row replacements, so a fully rewritten table keeps its rows in place.
+- Paired rows get cell edits through the existing slot recursion; unpaired rows are inserted whole or deleted whole, a deleted row anchored before the next surviving new row.
+- Any other table keeps the generic slot diff.
+
+Tradeoff: the column count is read from the table's own `columns` field under the default style chain; a column count that only comes from a `set table(columns: ...)` rule is not seen and such tables fall back to one cell per row, which degrades to the cell-level alignment rather than mis-grouping cells.

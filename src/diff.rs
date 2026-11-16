@@ -6753,11 +6753,245 @@ fn diff_slot_edits(old_ann: &AnnotatedContent, new_ann: &AnnotatedContent) -> Ve
     if all_slots_are_footnote_bodies(old_ann) && all_slots_are_footnote_bodies(new_ann) {
         return diff_footnote_body_slot_edits(old_ann, new_ann);
     }
+    if let Some(edits) = diff_table_slot_edits_by_rows(old_ann, new_ann) {
+        return edits;
+    }
     if slot_labels(old_ann) == slot_labels(new_ann) {
         diff_slot_edits_same_shape(old_ann, new_ann)
     } else {
         diff_slot_edits_lcs(old_ann, new_ann)
     }
+}
+
+/// Minimum row similarity for pairing an old and a new table row inside a
+/// changed run of rows; below it the rows are shown as deleted and inserted.
+const TABLE_ROW_PAIRING_THRESHOLD: f64 = 0.5;
+
+/// Row-wise slot edits for tables and grids whose cells form a plain
+/// row-major grid with the same column count on both sides.
+///
+/// Positional cell pairing turns an inserted or deleted row into a cascade of
+/// shifted cell replacements. Rows are aligned with Myers on their cell keys
+/// instead; inside a changed run, rows pair by similarity in document order.
+/// Paired rows get cell edits, unpaired rows are inserted or deleted whole.
+/// Returns `None` when the owners are not such tables, so the caller keeps
+/// the generic slot diff.
+fn diff_table_slot_edits_by_rows(
+    old_ann: &AnnotatedContent,
+    new_ann: &AnnotatedContent,
+) -> Option<Vec<RealizedEdit>> {
+    let kind = old_ann.annotation.semantic_kind.clone()?;
+    if !matches!(kind, SemanticKind::Table | SemanticKind::Grid)
+        || new_ann.annotation.semantic_kind.as_ref() != Some(&kind)
+    {
+        return None;
+    }
+    let columns = container_ops::plain_grid_columns(&effective_render_content(old_ann))?;
+    if container_ops::plain_grid_columns(&effective_render_content(new_ann))? != columns {
+        return None;
+    }
+    let old_slots = resolved_slots(old_ann);
+    let new_slots = resolved_slots(new_ann);
+    if old_slots.len() != old_ann.annotation.slots.len()
+        || new_slots.len() != new_ann.annotation.slots.len()
+    {
+        return None;
+    }
+    let old_rows: Vec<&[(&SemanticSlot, &AnnotatedContent)]> = old_slots.chunks(columns).collect();
+    let new_rows: Vec<&[(&SemanticSlot, &AnnotatedContent)]> = new_slots.chunks(columns).collect();
+    let row_key = |row: &[(&SemanticSlot, &AnnotatedContent)]| {
+        row.iter()
+            .map(|(_, child)| slot_child_match_key(child))
+            .collect::<Vec<_>>()
+            .join("\u{1f}")
+    };
+    let old_keys: Vec<String> = old_rows.iter().map(|row| row_key(row)).collect();
+    let new_keys: Vec<String> = new_rows.iter().map(|row| row_key(row)).collect();
+
+    // Aligned rows in output order: (old row, new row).
+    let mut alignment: Vec<(Option<usize>, Option<usize>)> = Vec::new();
+    for op in capture_diff_slices(Algorithm::Myers, &old_keys, &new_keys) {
+        match op {
+            DiffOp::Equal {
+                old_index,
+                new_index,
+                len,
+            } => alignment.extend((0..len).map(|i| (Some(old_index + i), Some(new_index + i)))),
+            DiffOp::Delete {
+                old_index, old_len, ..
+            } => alignment.extend((old_index..old_index + old_len).map(|i| (Some(i), None))),
+            DiffOp::Insert {
+                new_index, new_len, ..
+            } => alignment.extend((new_index..new_index + new_len).map(|i| (None, Some(i)))),
+            DiffOp::Replace {
+                old_index,
+                old_len,
+                new_index,
+                new_len,
+            } => alignment.extend(align_table_rows_by_similarity(
+                &old_rows[old_index..old_index + old_len],
+                &new_rows[new_index..new_index + new_len],
+                old_index,
+                new_index,
+            )),
+        }
+    }
+
+    let mut edits = Vec::new();
+    for (position, &(old_row, new_row)) in alignment.iter().enumerate() {
+        match (old_row, new_row) {
+            (Some(old_row), Some(new_row)) => {
+                let old_cells = old_rows[old_row];
+                let new_cells = new_rows[new_row];
+                for (cell, &(slot, new_child)) in new_cells.iter().enumerate() {
+                    match old_cells.get(cell) {
+                        Some(&(_, old_child)) => {
+                            if annotated_subtree_equal(old_child, new_child) {
+                                continue;
+                            }
+                            if let Some(content) = recursive_slot_edit_content(old_child, new_child)
+                            {
+                                edits.push(RealizedEdit::ReplaceAt {
+                                    path: slot.path.clone(),
+                                    content,
+                                });
+                            } else {
+                                push_modified_slot_edit(&mut edits, old_child, new_child, slot);
+                            }
+                        }
+                        None => edits.push(RealizedEdit::ReplaceAt {
+                            path: slot.path.clone(),
+                            content: EditContent::Inserted(effective_text_content(new_child)),
+                        }),
+                    }
+                }
+                let anchor = new_row * columns + new_cells.len();
+                for &(_, old_child) in old_cells.iter().skip(new_cells.len()) {
+                    push_deleted_slot_edit(&mut edits, old_child, &new_slots, anchor);
+                }
+            }
+            (None, Some(new_row)) => {
+                for &(slot, new_child) in new_rows[new_row] {
+                    edits.push(RealizedEdit::ReplaceAt {
+                        path: slot.path.clone(),
+                        content: EditContent::Inserted(effective_text_content(new_child)),
+                    });
+                }
+            }
+            (Some(old_row), None) => {
+                // A deleted row appears before the next surviving new row.
+                let anchor = alignment[position + 1..]
+                    .iter()
+                    .find_map(|&(_, new_row)| new_row)
+                    .map_or(new_slots.len(), |new_row| new_row * columns);
+                for &(_, old_child) in old_rows[old_row] {
+                    push_deleted_slot_edit(&mut edits, old_child, &new_slots, anchor);
+                }
+            }
+            (None, None) => {}
+        }
+    }
+    Some(edits)
+}
+
+/// Order-preserving pairing of the rows in one changed run (an LCS that
+/// maximizes the summed similarity of the pairs it keeps).
+fn align_table_rows_by_similarity(
+    old_rows: &[&[(&SemanticSlot, &AnnotatedContent)]],
+    new_rows: &[&[(&SemanticSlot, &AnnotatedContent)]],
+    old_offset: usize,
+    new_offset: usize,
+) -> Vec<(Option<usize>, Option<usize>)> {
+    let (m, n) = (old_rows.len(), new_rows.len());
+    let pair_score = |i: usize, j: usize| {
+        let score = table_row_similarity(old_rows[i], new_rows[j]);
+        (score >= TABLE_ROW_PAIRING_THRESHOLD).then_some(score)
+    };
+    let mut best = vec![vec![0.0f64; n + 1]; m + 1];
+    for i in (0..m).rev() {
+        for j in (0..n).rev() {
+            let skip = best[i + 1][j].max(best[i][j + 1]);
+            best[i][j] =
+                pair_score(i, j).map_or(skip, |score| skip.max(score + best[i + 1][j + 1]));
+        }
+    }
+    let mut out = Vec::new();
+    let (mut i, mut j) = (0, 0);
+    while i < m && j < n {
+        if let Some(score) = pair_score(i, j)
+            && best[i][j] == score + best[i + 1][j + 1]
+        {
+            out.push((Some(old_offset + i), Some(new_offset + j)));
+            i += 1;
+            j += 1;
+        } else if best[i + 1][j] >= best[i][j + 1] {
+            out.push((Some(old_offset + i), None));
+            i += 1;
+        } else {
+            out.push((None, Some(new_offset + j)));
+            j += 1;
+        }
+    }
+    out.extend((i..m).map(|i| (Some(old_offset + i), None)));
+    out.extend((j..n).map(|j| (None, Some(new_offset + j))));
+    pair_rows_between_anchors(out)
+}
+
+/// Unpaired deleted and inserted rows that sit between the same two paired
+/// rows (or run edges) occupy the same place in the table: they pair in order
+/// as row replacements with cell edits, and only the surplus is deleted or
+/// inserted whole. A fully rewritten table therefore keeps its rows in place
+/// instead of listing all old rows and then all new rows.
+fn pair_rows_between_anchors(
+    alignment: Vec<(Option<usize>, Option<usize>)>,
+) -> Vec<(Option<usize>, Option<usize>)> {
+    let mut out = Vec::with_capacity(alignment.len());
+    let mut gap_old = Vec::new();
+    let mut gap_new = Vec::new();
+    let flush = |out: &mut Vec<(Option<usize>, Option<usize>)>,
+                 gap_old: &mut Vec<usize>,
+                 gap_new: &mut Vec<usize>| {
+        let paired = gap_old.len().min(gap_new.len());
+        out.extend((0..paired).map(|k| (Some(gap_old[k]), Some(gap_new[k]))));
+        out.extend(gap_old[paired..].iter().map(|&o| (Some(o), None)));
+        out.extend(gap_new[paired..].iter().map(|&n| (None, Some(n))));
+        gap_old.clear();
+        gap_new.clear();
+    };
+    for entry in alignment {
+        match entry {
+            (Some(old), None) => gap_old.push(old),
+            (None, Some(new)) => gap_new.push(new),
+            paired => {
+                flush(&mut out, &mut gap_old, &mut gap_new);
+                out.push(paired);
+            }
+        }
+    }
+    flush(&mut out, &mut gap_old, &mut gap_new);
+    out
+}
+
+/// Similarity of two table rows: the share of identical cells, or the text
+/// similarity of the whole row when that is higher (one rewritten cell in an
+/// otherwise unchanged row, or several cells with small edits).
+fn table_row_similarity(
+    old_row: &[(&SemanticSlot, &AnnotatedContent)],
+    new_row: &[(&SemanticSlot, &AnnotatedContent)],
+) -> f64 {
+    let cells = old_row.len().max(new_row.len()).max(1);
+    let identical = old_row
+        .iter()
+        .zip(new_row)
+        .filter(|((_, old), (_, new))| slot_child_match_key(old) == slot_child_match_key(new))
+        .count();
+    let row_text = |row: &[(&SemanticSlot, &AnnotatedContent)]| {
+        row.iter()
+            .map(|(_, child)| effective_text_content(child).plain_text().to_string())
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    (identical as f64 / cells as f64).max(similarity(&row_text(old_row), &row_text(new_row)))
 }
 
 fn all_slots_are_footnote_bodies(node: &AnnotatedContent) -> bool {

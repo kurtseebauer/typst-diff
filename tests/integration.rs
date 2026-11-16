@@ -6332,3 +6332,46 @@ fn changed_list_before_inserted_paragraph_keeps_item_edit() {
         "expected the insertion:\n{log}"
     );
 }
+
+/// Tables are diffed row by row: an inserted row is inserted whole, a deleted
+/// row is deleted whole, and only a changed row gets cell-level word edits.
+/// Positional cell pairing would instead shift every following cell.
+#[test]
+fn table_rows_are_aligned_before_cells_are_diffed() {
+    let (_dir, result, _annotated) = diff_temp_sources(
+        "#table(columns: 2,\n  [Name], [Wert],\n  [Alpha], [eins],\n  [Beta], [zwei],\n  [Gamma], [drei],\n  [Delta], [vier],\n)\n",
+        "#table(columns: 2,\n  [Name], [Wert],\n  [Alpha], [eins],\n  [Neu], [neun],\n  [Beta], [zwei geändert],\n  [Delta], [vier],\n)\n",
+    );
+    let log = result.modification_log();
+    let (deleted, inserted) = collect_modified_word_texts(&result.blocks);
+    assert_eq!(
+        deleted, "",
+        "no cell of a surviving row loses words:\n{log}"
+    );
+    assert_eq!(
+        inserted.trim(),
+        "geändert",
+        "only the changed cell gets a word edit:\n{log}"
+    );
+    for expected in [
+        "insert\ntext: Neu",
+        "insert\ntext: neun",
+        "delete\ntext: Gamma",
+        "delete\ntext: drei",
+    ] {
+        assert!(log.contains(expected), "missing {expected:?}:\n{log}");
+    }
+    assert!(!log.contains("text: Beta"), "Beta row must survive:\n{log}");
+}
+
+/// Spanning cells do not form a plain row-major grid; such tables keep the
+/// generic cell diff instead of being split into rows.
+#[test]
+fn spanning_table_cells_keep_generic_cell_diff() {
+    let (_dir, result, _annotated) = diff_temp_sources(
+        "#table(columns: 2,\n  table.cell(colspan: 2)[Kopf],\n  [A], [eins alt],\n)\n",
+        "#table(columns: 2,\n  table.cell(colspan: 2)[Kopf],\n  [A], [eins],\n)\n",
+    );
+    let (deleted, _inserted) = collect_modified_word_texts(&result.blocks);
+    assert!(deleted.contains("alt"), "{}", result.modification_log());
+}
