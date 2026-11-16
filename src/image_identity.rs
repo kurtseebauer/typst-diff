@@ -60,10 +60,7 @@ fn span_free_image_rule(
 fn without_load_span(elem: &Packed<ImageElem>) -> Packed<ImageElem> {
     let mut elem = elem.clone();
     let loaded = &elem.source.derived;
-    let detached = Loaded::new(
-        Spanned::detached(loaded.source.v.clone()),
-        loaded.data.clone(),
-    );
+    let detached = Loaded::new(Spanned::detached(loaded.source.v), loaded.data.clone());
     elem.source = Derived::new(elem.source.source.clone(), detached);
     elem
 }
