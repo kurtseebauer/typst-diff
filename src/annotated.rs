@@ -9,7 +9,7 @@ use crate::container_ops::{self, ContainerKind};
 use std::collections::VecDeque;
 use typst::foundations::{Content, ContextElem, SequenceElem, StyleChain, StyledElem};
 use typst::introspection::{Tag, TagElem};
-use typst::layout::{BlockBody, BlockElem};
+use typst::layout::{BlockBody, BlockElem, PagebreakElem};
 use typst::math::EquationElem;
 use typst::model::{FootnoteBody, FootnoteElem, HeadingElem, ParElem, ParbreakElem};
 use typst::syntax::Span;
@@ -891,16 +891,28 @@ fn pair_sequence_by_span(
         }
 
         // Introspection tags open or close the realized surface of an
-        // element; they are never that surface itself. A visible source child
-        // without a span partner (an `align` that realizes as a paragraph, a
-        // heading whose show rule builds a new block) pairs with the next
-        // surface after the tags, as long as that surface lies before the span
-        // match of a later source child.
+        // element, and page breaks (weak ones are inserted by realization at
+        // page-run boundaries) separate surfaces; neither is ever the surface
+        // of visible authored content. A visible source child without a span
+        // partner (an `align` that realizes as paragraphs, a heading whose show
+        // rule builds a new block) pairs with the next surface after these
+        // markers, as long as that surface lies before the span match of a
+        // later source child.
+        //
+        // The fallback never takes the span partner of a later source child.
+        // Inline children after the first one of a multi-line paragraph have
+        // no partner of their own (they realized into that paragraph); taking
+        // the next realized child would hand them the following heading or
+        // table and shift every later pairing. They get no realized surface.
         if !is_invisible_pre_child(pre_child) {
-            let limit =
-                next_pre_child_span_match(pre_children, pre_index + 1, real_children, cursor)
-                    .unwrap_or(real_children.len());
-            let surface = (cursor..limit).find(|&idx| !is_tag(&real_children[idx]));
+            let next_match =
+                next_pre_child_span_match(pre_children, pre_index + 1, real_children, cursor);
+            if next_match == Some(cursor) {
+                out.push(annotate_realized(pre_child, &Content::empty()));
+                continue;
+            }
+            let limit = next_match.unwrap_or(real_children.len());
+            let surface = (cursor..limit).find(|&idx| !is_surface_marker(&real_children[idx]));
             if let Some(surface) = surface {
                 while cursor < surface {
                     cursor = push_unmatched_realized_child(&mut out, real_children, cursor);
@@ -1039,8 +1051,9 @@ fn is_styled_sequence(content: &Content) -> bool {
         .is_some_and(|styled| styled.child.is::<SequenceElem>())
 }
 
-fn is_tag(content: &Content) -> bool {
-    without_style_wrappers(content).is::<TagElem>()
+fn is_surface_marker(content: &Content) -> bool {
+    let inner = without_style_wrappers(content);
+    inner.is::<TagElem>() || inner.is::<PagebreakElem>()
 }
 
 fn is_start_tag(content: &Content) -> bool {

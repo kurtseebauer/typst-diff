@@ -214,3 +214,14 @@ Tradeoff: headings whose presentation really changes (corpus 44, a changed headi
 - Images created by show rules during realization pass through a wrapper around Typst's built-in paged image rule in the diff library: it detaches the load span and delegates to the built-in rule (fetched from the library's `NativeRuleMap`, since `IMAGE_RULE` is private to `typst-layout`).
 
 Tradeoff: image decoding diagnostics raised while laying out the annotated document no longer point at the `image(...)` call. Load errors are still reported with their location during evaluation, before the span is detached. Images created inside show-rule output below the top level of that output keep their span and can still be reported as changed.
+
+## Owners Stay On Their Own Blocks
+
+Fixing template pairing exposed several older places where an owner reached the wrong block. In a long document one misplaced owner shifts every later pairing, so lists, enums and tables far away lost their item and cell edits.
+
+- **Multi-line paragraphs.** A paragraph written over several lines has several inline source children but realizes as one paragraph; only the first child has a span partner. The positional fallback handed the following children the next realized children and, once those ran out, the block of the next heading. The fallback now never takes the span partner of a later source child; such a child gets no realized surface of its own.
+- **Page breaks are markers.** Visible authored content never realizes as a page break. The positional fallback skips page breaks (including the weak ones realization inserts at page-run boundaries) like introspection tags, so a template title `align` pairs with its own surface instead of a page break.
+- **Deferred owners.** An equal, text-empty block whose owner is a slot owner or an opaque visual is deferred so the claim reaches the empty carrier that follows the owner's shell. An opaque visual owner is no longer deferred when the block is itself the visual's layouter carrier (a realized image), and any deferred claim is dropped as soon as a visible block is processed. Before, an unchanged image or title claim was handed to a much later changed table.
+- **Edit-zone ties.** Delete/insert pairing within an edit zone is greedy by text similarity. Text-empty blocks all score the same, and `max_by` picked the last insert, typically an introspection tag instead of the realized list. Ties now prefer an insert of the same innermost element kind, then the earliest one.
+
+Tradeoff: an inline source child that realized into an earlier paragraph no longer has a realized node of its own; its text is still carried by the paragraph that owns the realized surface. The element-kind tie-break only orders candidates that text similarity cannot distinguish.

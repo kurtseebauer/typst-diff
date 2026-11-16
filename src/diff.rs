@@ -1110,6 +1110,13 @@ fn match_edit_zones_inner(
     Ok(result)
 }
 
+fn innermost_element_name(content: &Content) -> &'static str {
+    match content.to_packed::<StyledElem>() {
+        Some(styled) => innermost_element_name(&styled.child),
+        None => content.func().name(),
+    }
+}
+
 fn pair_edit_zone(
     deletes: Vec<DiffBlock>,
     inserts: Vec<DiffBlock>,
@@ -1154,6 +1161,10 @@ fn pair_edit_zone(
 
     for del in &deletes {
         let del_text = del.content.plain_text();
+        let del_kind = innermost_element_name(&del.content);
+        // Text similarity cannot tell text-empty blocks apart (a realized list
+        // and an introspection tag both score 1.0 against an empty delete), so
+        // ties prefer an insert of the same element kind, then the earliest.
         let best = inserts
             .iter()
             .enumerate()
@@ -1162,9 +1173,16 @@ fn pair_edit_zone(
                 (
                     j,
                     similarity(del_text.as_str(), ins.content.plain_text().as_str()),
+                    innermost_element_name(&ins.content) == del_kind,
                 )
             })
-            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+            .max_by(|a, b| {
+                a.1.partial_cmp(&b.1)
+                    .unwrap()
+                    .then(a.2.cmp(&b.2))
+                    .then(b.0.cmp(&a.0))
+            })
+            .map(|(j, sim, _)| (j, sim));
 
         if debug_events.is_some() {
             for (j, ins) in inserts
@@ -3537,6 +3555,13 @@ fn diff_annotated_inner_with_events(
     while op_index < matched_ops.len() {
         let op = matched_ops[op_index].clone();
         op_index += 1;
+        // A deferred owner belongs to the empty carrier that follows its
+        // invisible shell. Once a visible block comes first, that carrier did
+        // not change, and the claim must not reach a later, unrelated block.
+        if block_op_has_visible_text(&op) {
+            deferred_old_owner = None;
+            deferred_new_owner = None;
+        }
         match op {
             BlockOp::Equal(old_block, new_block) => {
                 let page_styles = new_block.page_styles.clone();
@@ -4042,6 +4067,14 @@ fn inherit_layout_page_context(blocks: &mut [DiffBlockEdit]) {
         if let Some(context) = context {
             blocks[index].page_styles = context;
         }
+    }
+}
+
+fn block_op_has_visible_text(op: &BlockOp) -> bool {
+    let visible = |block: &DiffBlock| !block.content.plain_text().trim().is_empty();
+    match op {
+        BlockOp::Equal(old, new) | BlockOp::Replace(old, new) => visible(old) || visible(new),
+        BlockOp::Delete(block) | BlockOp::Insert(block) => visible(block),
     }
 }
 
@@ -5734,7 +5767,12 @@ fn should_defer_invisible_owner_edit(block: &Content, owner: &AnnotatedContent) 
     if should_defer_invisible_equation_owner(block, owner) {
         return true;
     }
-    if is_opaque_visual_owner(owner) {
+    // An opaque visual owner is deferred so that its claim reaches the empty
+    // carrier that realizes the visual. When this block is that carrier (a
+    // text-empty layouter block such as a realized image), the owner is fully
+    // represented here; deferring it would hand its claim to an unrelated
+    // later replacement.
+    if is_opaque_visual_owner(owner) && !contains_text_empty_opaque_layouter_surface(block) {
         return true;
     }
     false

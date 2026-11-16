@@ -6239,3 +6239,96 @@ fn unchanged_image_in_separate_source_files_is_not_a_change() {
         "expected the text edit, got:\n{log}"
     );
 }
+
+/// An unchanged image is its own realized carrier. Its owner claim must not be
+/// deferred to a later, unrelated replacement such as a changed table, and the
+/// claim of a template title (`align` around a logo) must not reach a table
+/// that follows after visible, unchanged blocks.
+#[test]
+fn unchanged_image_owner_does_not_capture_later_table_edit() {
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10"><rect width="20" height="10" fill="teal"/></svg>"#;
+    let table_old = "#table(columns: 2, [A], [eins], [B], [zwei alt])";
+    let table_new = "#table(columns: 2, [A], [eins], [B], [zwei])";
+    let preludes = [
+        "#image(\"pic.svg\", width: 2cm)\n= H\n",
+        "#let t(body) = {\n  align(center)[#image(\"pic.svg\", width: 2cm)\n  #v(1em)\n  Titel]\n  pagebreak()\n  body\n}\n#show: t\n= H\n",
+    ];
+    for prelude in preludes {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("pic.svg"), svg).unwrap();
+        std::fs::write(
+            dir.path().join("old.typ"),
+            format!("{prelude}\n{table_old}\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("new.typ"),
+            format!("{prelude}\n{table_new}\n"),
+        )
+        .unwrap();
+        let old_world = typst_diff::world::SystemWorld::new(dir.path().join("old.typ")).unwrap();
+        let new_world = typst_diff::world::SystemWorld::new(dir.path().join("new.typ")).unwrap();
+        let old = typst_diff::eval_to_realized_content(&old_world).unwrap();
+        let new = typst_diff::eval_to_realized_content(&new_world).unwrap();
+        let result = typst_diff::diff::diff_annotated(&old, &new);
+        let log = result.modification_log();
+        assert!(
+            !log.contains("[opaque visual content]"),
+            "table edit lost its owner:\n{log}"
+        );
+        let (deleted, _inserted) = collect_modified_word_texts(&result.blocks);
+        assert!(
+            deleted.contains("alt"),
+            "expected the cell edit, got:\n{log}"
+        );
+    }
+}
+
+/// A multi-line paragraph has several inline source children but realizes as
+/// one paragraph. Its later inline children must not take the realized block
+/// of the following heading, or every later owner shifts and a subsequent
+/// list edit is lost behind a wrong owner.
+#[test]
+fn multiline_paragraph_inline_children_do_not_take_next_heading() {
+    let template =
+        "#let t(body) = { set par(justify: true); align(center)[Titel]; body }\n#show: t\n";
+    let body =
+        "= A\n\nErste Zeile mit _Betonung_\nzweite Zeile -- mit Strich\ndritte Zeile.\n\n== B\n\n";
+    let old_source = format!("{template}{body}- a\n- b alt\n");
+    let new_source = format!("{template}{body}- a\n- b\n");
+    let (_dir, result, _annotated) = diff_temp_sources(&old_source, &new_source);
+    let log = result.modification_log();
+    assert!(
+        !log.contains("[opaque visual content]"),
+        "list edit became an opaque replacement:\n{log}"
+    );
+    let (deleted, _inserted) = collect_modified_word_texts(&result.blocks);
+    assert!(
+        deleted.contains("alt"),
+        "expected the list item edit, got:\n{log}"
+    );
+}
+
+/// A changed list followed by an inserted paragraph keeps its item-level edit;
+/// the insertion must not turn the list into an opaque replacement.
+#[test]
+fn changed_list_before_inserted_paragraph_keeps_item_edit() {
+    let (_dir, result, _annotated) = diff_temp_sources(
+        "Vor:\n\n- eins,\n- zwei alt,\n- drei.\n",
+        "Vor:\n\n- eins,\n- zwei,\n- drei.\n\nNeuer Absatz hier.\n",
+    );
+    let log = result.modification_log();
+    assert!(
+        !log.contains("[opaque visual content]"),
+        "list edit became an opaque replacement:\n{log}"
+    );
+    let (deleted, _inserted) = collect_modified_word_texts(&result.blocks);
+    assert!(
+        deleted.contains("alt"),
+        "expected the list item edit, got:\n{log}"
+    );
+    assert!(
+        log.contains("Neuer Absatz hier."),
+        "expected the insertion:\n{log}"
+    );
+}
