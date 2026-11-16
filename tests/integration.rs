@@ -6160,3 +6160,44 @@ fn repeated_same_span_blocks_preserve_document_order() {
     );
     assert_eq!(plain.matches("Delta").count(), 1, "{plain}");
 }
+
+/// A document template that emits content (here an `align` title) before its
+/// `body` nests the authored body in a sequence that realization flattens.
+/// Lists, enums and tables inside that body must keep their semantic owners
+/// and produce word/cell-level edits instead of whole opaque replacements.
+#[test]
+fn template_prefix_content_keeps_body_structures_word_diffable() {
+    let template = r#"#let t(body) = {
+  set par(justify: true)
+  align(center)[Titel]
+  v(2em)
+  pagebreak()
+  body
+}
+#show: t
+"#;
+    let cases = [
+        ("+ a\n+ b alt\n", "+ a\n+ b\n", "alt"),
+        ("- a\n- b alt\n", "- a\n- b\n", "alt"),
+        (
+            "#table(columns: 2, [A], [eins], [B], [zwei alt])\n",
+            "#table(columns: 2, [A], [eins], [B], [zwei])\n",
+            "alt",
+        ),
+    ];
+    for (old_body, new_body, deleted_word) in cases {
+        let old_source = format!("{template}\n{old_body}");
+        let new_source = format!("{template}\n{new_body}");
+        let (_dir, result, _annotated) = diff_temp_sources(&old_source, &new_source);
+        let log = result.modification_log();
+        assert!(
+            !log.contains("[opaque visual content]"),
+            "body structure became an opaque replacement:\n{log}"
+        );
+        let (deleted, _inserted) = collect_modified_word_texts(&result.blocks);
+        assert!(
+            deleted.contains(deleted_word),
+            "expected word-level deletion of {deleted_word:?}, got {deleted:?}\n{log}"
+        );
+    }
+}

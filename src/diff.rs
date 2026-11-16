@@ -26,7 +26,7 @@ use std::hash::{Hash, Hasher};
 use similar::{Algorithm, DiffOp, capture_diff_slices};
 use typst::foundations::{
     Content, ContextElem, NativeElement, Repr, SequenceElem, Smart, Style, StyleChain, StyledElem,
-    Styles,
+    Styles, SymbolElem,
 };
 use typst::introspection::{MetadataElem, StateUpdateElem, Tag, TagElem};
 use typst::layout::{
@@ -3295,12 +3295,18 @@ fn context_presentation_key(content: &Content) -> String {
 
 fn write_context_presentation_key(content: &Content, out: &mut String) {
     if let Some(seq) = content.to_packed::<SequenceElem>() {
-        out.push_str("seq[");
+        // Sequences carry no presentation of their own: `[A --- B]` realizes as
+        // a sequence of text and space leaves, `[A]` as a single text leaf, and
+        // both present the same way. Only children with a presentation key
+        // contribute, so re-chunking plain text is not a presentation change.
         for child in &seq.children {
-            write_context_presentation_key(child, out);
-            out.push(';');
+            let mut child_key = String::new();
+            write_context_presentation_key(child, &mut child_key);
+            if !child_key.is_empty() {
+                out.push_str(&child_key);
+                out.push(';');
+            }
         }
-        out.push(']');
     } else if let Some(styled) = content.to_packed::<StyledElem>() {
         out.push_str("styled(");
         write_styles_key(&styled.styles, out);
@@ -3328,7 +3334,11 @@ fn write_context_presentation_key(content: &Content, out: &mut String) {
             write_context_presentation_key(&body, out);
         }
         out.push(']');
-    } else if is_metadata_tag(content) || content.is::<TextElem>() || content.is::<SpaceElem>() {
+    } else if is_metadata_tag(content)
+        || content.is::<TextElem>()
+        || content.is::<SymbolElem>()
+        || content.is::<SpaceElem>()
+    {
     } else {
         let children = container_ops::semantic_diff_child_contents(content);
         if !children.is_empty() {
@@ -3978,6 +3988,7 @@ fn diff_annotated_inner_with_events(
         }
     }
     blocks.extend(layout.take_trailing());
+    inherit_layout_page_context(&mut blocks);
     let before_prune_edits = count_block_edits(&blocks);
     prune_duplicate_empty_container_edits(&mut blocks);
     let after_prune_edits = count_block_edits(&blocks);
@@ -4006,6 +4017,32 @@ fn diff_annotated_inner_with_events(
         rendered_regions: vec![],
     };
     Ok((result, prepared.debug))
+}
+
+/// Layout-only blocks (paragraph breaks from the authored surface) have no page
+/// context of their own: their page styles come from the pre-realization
+/// surface, while neighbouring blocks carry the realized page styles. Unequal
+/// page styles split the annotated stream into separate page runs, so a layout
+/// block takes the page context of the preceding content block (or of the
+/// following one at the start of the document).
+fn inherit_layout_page_context(blocks: &mut [DiffBlockEdit]) {
+    let is_layout = |block: &DiffBlockEdit| block.base_provenance == BlockBaseProvenance::Layout;
+    let mut current: Option<Styles> = None;
+    for index in 0..blocks.len() {
+        if !is_layout(&blocks[index]) {
+            current = Some(blocks[index].page_styles.clone());
+            continue;
+        }
+        let context = current.clone().or_else(|| {
+            blocks[index + 1..]
+                .iter()
+                .find(|block| !is_layout(block))
+                .map(|block| block.page_styles.clone())
+        });
+        if let Some(context) = context {
+            blocks[index].page_styles = context;
+        }
+    }
 }
 
 fn count_block_edits(blocks: &[DiffBlockEdit]) -> usize {

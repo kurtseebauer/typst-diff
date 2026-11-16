@@ -194,3 +194,15 @@ Tradeoff: CeTZ changes are currently represented as whole opaque old/new visual 
 - `World::today` takes a `Duration` offset in 0.15. It is truncated to whole seconds, matching `typst-kit`'s implementation; Typst's `datetime.today(offset:)` still interprets integer offsets as hours.
 
 Tradeoff: cloning the library per layout/realize call is cheap (modules and styles are reference-counted; the rule map has a few hundred entries) and avoids a process-global library that would ignore per-world library configuration.
+
+## Template Bodies Keep Their Realized Partners
+
+- A document template (`#show: t` with `t(body) = { set ...; title; body }`) nests the authored body in the pre-realization tree: `seq[seq[title, body...]]` without set rules, `seq[styled(seq[title, body...])]` with them. Realization dissolves both into one flat run of individually styled children.
+- Sequence pairing used to pair the nested sequence as one unit against a single realized child (often an introspection tag). Every authored child below it was then annotated against itself, so lists, enums and tables in the body lost their realized partner and became whole opaque replacements. Documents with a root-level `#set page(...)` lost every semantic owner the same way.
+- Nested unstyled sequences are spliced into their parent before pairing, as realization does. A styled sequence is kept whole and owns the realized run up to the span match of its next sibling, like the existing context runs. Distributing its styles onto each child instead would give layout-only surface children page styles that differ from the realized ones.
+- When splicing happened, pairing always uses spans: an equal child count after splicing is coincidental.
+- Introspection tags are never the realized surface of authored content. Span matching skips start tags for visible source children (a start tag carries its element's span), and the positional fallback skips start and end tags up to the span match of the next source child. Without that bound, several inline source children that realize into one paragraph would skip into the following element's surface.
+- Layout-only blocks (paragraph breaks from the authored surface) inherit the page styles of the preceding content block. Their own page styles come from the pre-realization surface and are distinct `Style` instances from the realized ones, which split the annotated stream into separate page runs.
+- Heading presentation keys treat sequences and `SymbolElem` leaves as transparent. `= A --- B` realizes as a sequence with a symbol leaf, `= A` as a single text leaf; re-chunking plain text is not a presentation change and no longer forces a context-split replacement.
+
+Tradeoff: headings whose presentation really changes (corpus 44, a changed heading show rule) now consistently take the context-split path (old display struck, new display inserted) for every heading, where previously only the first heading of the document had an owner at all and the others fell back to word replacement. This follows the "formatting changes count as edits" design but changes the rendering of that corpus case.

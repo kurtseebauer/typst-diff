@@ -289,21 +289,30 @@ pub fn annotate_realized(pre: &Content, realized: &Content) -> AnnotatedContent 
         pre.to_packed::<SequenceElem>(),
         realized.to_packed::<SequenceElem>(),
     ) {
-        let children: Vec<AnnotatedContent> =
-            if sequence_contains_footnote(pre_seq) && sequence_has_paragraph_blocks(real_seq) {
-                pair_sequence_with_footnote_paragraphs(&pre_seq.children, &real_seq.children)
-            } else if pre_seq.children.len() == real_seq.children.len()
-                && !sequence_needs_context_pairing(&pre_seq.children, &real_seq.children)
-            {
-                pre_seq
-                    .children
-                    .iter()
-                    .zip(real_seq.children.iter())
-                    .map(|(p, r)| annotate_realized(p, r))
-                    .collect()
-            } else {
-                pair_sequence_by_span(&pre_seq.children, &real_seq.children)
-            };
+        // An equal child count after flattening is coincidental: the flattened
+        // run interleaves template output with authored children, so it is
+        // paired by span rather than by position.
+        let flattened = pre_seq
+            .children
+            .iter()
+            .any(|child| child.is::<SequenceElem>());
+        let pre_children = flatten_nested_sequences(&pre_seq.children);
+        let children: Vec<AnnotatedContent> = if pre_children.iter().any(content_contains_footnote)
+            && sequence_has_paragraph_blocks(real_seq)
+        {
+            pair_sequence_with_footnote_paragraphs(&pre_children, &real_seq.children)
+        } else if !flattened
+            && pre_children.len() == real_seq.children.len()
+            && !sequence_needs_context_pairing(&pre_children, &real_seq.children)
+        {
+            pre_children
+                .iter()
+                .zip(real_seq.children.iter())
+                .map(|(p, r)| annotate_realized(p, r))
+                .collect()
+        } else {
+            pair_sequence_by_span(&pre_children, &real_seq.children)
+        };
         let patch_surface = sequence_patch_surface(&children);
         let has_layout_surface = children.len() != real_seq.children.len()
             && children
@@ -424,8 +433,26 @@ pub fn annotate_realized(pre: &Content, realized: &Content) -> AnnotatedContent 
     )
 }
 
-fn sequence_contains_footnote(seq: &SequenceElem) -> bool {
-    seq.children.iter().any(content_contains_footnote)
+/// Splice nested unstyled sequences into their parent, as realization does.
+///
+/// Typst realization emits one flat run of children per sequence level, so a
+/// nested `SequenceElem` never survives as a single realized child. Show rules
+/// such as document templates (`#show: t` with `t(body) = { title; body }`)
+/// produce exactly this nesting in the pre-realization tree. Pairing the nested
+/// sequence as one unit against the flat realized run detaches every authored
+/// child from its realized partner, so it is spliced before pairing. Styled
+/// sequences are kept whole (see [`pair_sequence_by_span`]): distributing their
+/// styles onto each child would change the page runs of the output surface.
+fn flatten_nested_sequences(children: &[Content]) -> Vec<Content> {
+    let mut out = Vec::with_capacity(children.len());
+    for child in children {
+        if let Some(seq) = child.to_packed::<SequenceElem>() {
+            out.extend(flatten_nested_sequences(&seq.children));
+        } else {
+            out.push(child.clone());
+        }
+    }
+    out
 }
 
 fn content_contains_footnote(content: &Content) -> bool {
@@ -458,6 +485,15 @@ fn content_contains_context(content: &Content) -> bool {
         return content_contains_context(&par.body);
     }
     false
+}
+
+/// The element inside any `StyledElem` wrappers that realization adds.
+fn without_style_wrappers(content: &Content) -> &Content {
+    let mut current = content;
+    while let Some(styled) = current.to_packed::<StyledElem>() {
+        current = &styled.child;
+    }
+    current
 }
 
 fn sequence_has_paragraph_blocks(seq: &SequenceElem) -> bool {
@@ -715,6 +751,20 @@ fn pair_sequence_by_span(
             continue;
         }
 
+        // A styled sequence (e.g. a template body under its `set` rules) is
+        // dissolved by realization into a run of individually styled children.
+        // It owns the realized run up to the span match of its next sibling.
+        if is_styled_sequence(pre_child) && cursor < real_children.len() {
+            let end = next_pre_child_span_match(pre_children, pre_index + 1, real_children, cursor)
+                .unwrap_or(real_children.len());
+            if end > cursor {
+                let realized_run = Content::sequence(real_children[cursor..end].iter().cloned());
+                out.push(annotate_realized(pre_child, &realized_run));
+                cursor = end;
+                continue;
+            }
+        }
+
         if pre_child.is::<ContextElem>() && cursor < real_children.len() {
             let fallback_end =
                 next_pre_child_span_match(pre_children, pre_index + 1, real_children, cursor)
@@ -789,6 +839,11 @@ fn pair_sequence_by_span(
             if is_invisible_pre_child(pre_child) && !is_invisible_realized_child(real_child) {
                 continue;
             }
+            // A start tag shares its element's span but only opens the
+            // element's realized surface (see the positional fallback below).
+            if !is_invisible_pre_child(pre_child) && is_start_tag(real_child) {
+                continue;
+            }
             if effective_span(real_child) == target {
                 match_idx = Some(idx);
                 break;
@@ -832,6 +887,24 @@ fn pair_sequence_by_span(
             if is_invisible_pre_child(pre_child) || cursor >= real_children.len() {
                 out.push(annotate_realized(pre_child, pre_child));
                 continue;
+            }
+        }
+
+        // Introspection tags open or close the realized surface of an
+        // element; they are never that surface itself. A visible source child
+        // without a span partner (an `align` that realizes as a paragraph, a
+        // heading whose show rule builds a new block) pairs with the next
+        // surface after the tags, as long as that surface lies before the span
+        // match of a later source child.
+        if !is_invisible_pre_child(pre_child) {
+            let limit =
+                next_pre_child_span_match(pre_children, pre_index + 1, real_children, cursor)
+                    .unwrap_or(real_children.len());
+            let surface = (cursor..limit).find(|&idx| !is_tag(&real_children[idx]));
+            if let Some(surface) = surface {
+                while cursor < surface {
+                    cursor = push_unmatched_realized_child(&mut out, real_children, cursor);
+                }
             }
         }
 
@@ -958,6 +1031,22 @@ fn find_context_descendant_span(realized: &Content) -> Option<Span> {
     container_ops::realized_child_contents(realized)
         .iter()
         .find_map(find_context_descendant_span)
+}
+
+fn is_styled_sequence(content: &Content) -> bool {
+    content
+        .to_packed::<StyledElem>()
+        .is_some_and(|styled| styled.child.is::<SequenceElem>())
+}
+
+fn is_tag(content: &Content) -> bool {
+    without_style_wrappers(content).is::<TagElem>()
+}
+
+fn is_start_tag(content: &Content) -> bool {
+    without_style_wrappers(content)
+        .to_packed::<TagElem>()
+        .is_some_and(|tag| matches!(tag.tag, Tag::Start(..)))
 }
 
 fn is_invisible_pre_child(content: &Content) -> bool {
