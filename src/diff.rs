@@ -4070,6 +4070,13 @@ fn inherit_layout_page_context(blocks: &mut [DiffBlockEdit]) {
     }
 }
 
+fn is_introspection_tag_block(content: &Content) -> bool {
+    match content.to_packed::<StyledElem>() {
+        Some(styled) => is_introspection_tag_block(&styled.child),
+        None => content.is::<TagElem>(),
+    }
+}
+
 fn block_op_has_visible_text(op: &BlockOp) -> bool {
     let visible = |block: &DiffBlock| !block.content.plain_text().trim().is_empty();
     match op {
@@ -5912,6 +5919,13 @@ fn find_annotated_block_owner<'a>(
     root: &'a AnnotatedContent,
     target: &Content,
 ) -> Option<&'a AnnotatedContent> {
+    // An introspection tag only opens or closes an element's surface. An
+    // invisible source element (an `align` around a diagram) may be paired
+    // with its start tag, but rendering the tag block from that owner would
+    // replace the tag, and with it the labels and locations it carries.
+    if is_introspection_tag_block(target) {
+        return None;
+    }
     let exact = find_annotated_child(root, target);
     if exact.is_some_and(|node| !node.annotation.slots.is_empty()) {
         return exact;
@@ -7330,6 +7344,51 @@ mod tests {
 
     fn seq(items: impl IntoIterator<Item = Content>) -> Content {
         Content::sequence(items)
+    }
+
+    /// Introspection tags compare equal regardless of the element they
+    /// delimit. A source element paired with its start tag must therefore not
+    /// become the owner of every other tag block in the document.
+    #[test]
+    fn tag_blocks_get_no_owner_even_if_an_owner_realized_a_tag() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("main.typ");
+        std::fs::write(
+            &path,
+            "#set heading(numbering: \"1.\")\n= A\n\nText.\n\n= B <b>\n\nMehr @b.\n",
+        )
+        .unwrap();
+        let world = crate::world::SystemWorld::new(&path).unwrap();
+        let realized = crate::eval::eval_to_realized_content(&world)
+            .unwrap()
+            .realized;
+        let tags: Vec<Content> = extract_block_units(&realized)
+            .into_iter()
+            .map(|block| block.content)
+            .filter(is_introspection_tag_block)
+            .collect();
+        assert!(tags.len() >= 2, "expected several tag blocks");
+        let owner = AnnotatedContent {
+            realized: tags[0].clone(),
+            annotation: crate::annotated::Annotation {
+                semantic_kind: Some(SemanticKind::Wrapper(WrapperKind::Align)),
+                slots: vec![SemanticSlot {
+                    label: SlotStep::WrapperBody,
+                    path: vec![0],
+                    patch_path: None,
+                }],
+                ..Default::default()
+            },
+            children: vec![annotated(&Content::empty())],
+        };
+        let root = AnnotatedContent {
+            realized: Content::sequence(tags.iter().cloned()),
+            annotation: Default::default(),
+            children: vec![owner],
+        };
+        for tag in &tags {
+            assert!(find_annotated_block_owner(&root, tag).is_none());
+        }
     }
 
     fn annotated(content: &Content) -> AnnotatedContent {
