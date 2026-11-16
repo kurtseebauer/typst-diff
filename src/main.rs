@@ -1,4 +1,4 @@
-use typst_diff::{annotate, build_info, debug, diff, eval, render_to_pdf, trace, world};
+use typst_diff::{annotate, build_info, debug, diff, eval, render, render_to_pdf, trace, world};
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -30,6 +30,10 @@ struct Args {
     /// Show substitutions as blue without red strikethrough; insertions green, deletions red
     #[arg(short = 's', long)]
     compact_substitutions: bool,
+    /// Only write pages with changes in the document body; changes that only
+    /// affect headers or footers (page numbers, version lines) do not count
+    #[arg(short = 'p', long)]
+    changed_pages_only: bool,
     /// Write structured YAML diagnostics next to the output PDF
     #[arg(long)]
     debug: bool,
@@ -172,10 +176,15 @@ fn run_pipeline(
         annotate::build_annotated_content_from_tree_with_debug_events(
             &diff_result,
             args.compact_substitutions,
+            args.changed_pages_only,
             writer,
         )?
     } else {
-        annotate::build_annotated_content_from_tree(&diff_result, args.compact_substitutions)
+        annotate::build_marked_annotated_content_from_tree(
+            &diff_result,
+            args.compact_substitutions,
+            args.changed_pages_only,
+        )
     };
     emit_cli_trace(
         &mut trace_writer,
@@ -271,7 +280,31 @@ fn write_log_and_pdf(
         trace_writer,
         trace::PipelineTraceEvent::new("render", "start"),
     )?;
-    let pdf_bytes = render_to_pdf(annotated, new_world).context("failed to render PDF")?;
+    let pdf_bytes = if args.changed_pages_only {
+        let rendered = render::render_changed_pages_to_pdf(annotated, new_world)
+            .context("failed to render PDF")?;
+        if rendered.pages.is_empty() {
+            eprintln!(
+                "No changes in the document body; writing all {} pages",
+                rendered.total_pages
+            );
+        } else {
+            eprintln!(
+                "Changed pages ({} of {}): {}",
+                rendered.pages.len(),
+                rendered.total_pages,
+                rendered
+                    .pages
+                    .iter()
+                    .map(usize::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        rendered.bytes
+    } else {
+        render_to_pdf(annotated, new_world).context("failed to render PDF")?
+    };
     emit_cli_trace(
         trace_writer,
         trace::PipelineTraceEvent::new("render", "end")

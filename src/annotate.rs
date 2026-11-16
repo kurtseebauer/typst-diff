@@ -17,8 +17,11 @@
 //! started whenever the page styles change. This preserves `#set page(…)` boundaries
 //! (margins, headers, footers) across section breaks in the diff output.
 
-use typst::foundations::{Content, NativeElement, Smart, Style, Styles};
+use std::cell::Cell;
+
+use typst::foundations::{Content, Label, NativeElement, Smart, Style, Styles, Value};
 use typst::foundations::{SequenceElem, StyleChain, StyledElem};
+use typst::introspection::MetadataElem;
 use typst::layout::{
     Abs, AlignElem, BlockBody, BlockElem, BoxElem, ColumnsElem, HideElem, PadElem, PageElem,
     PlaceElem, Rel, Sides,
@@ -74,6 +77,44 @@ impl ChangeColor {
     }
 }
 
+thread_local! {
+    /// Set while the body blocks of a marked annotation are built.
+    static MARK_CHANGES: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Label of the invisible markers that a marked annotation places at every
+/// visible change in the document body (not in headers or footers).
+pub fn change_marker_label() -> Label {
+    Label::new(typst::utils::PicoStr::intern("typst-diff-change"))
+        .expect("marker label is not empty")
+}
+
+/// Prefix `content` with a change marker when building a marked annotation.
+fn with_change_marker(content: Content) -> Content {
+    if !MARK_CHANGES.with(Cell::get) {
+        return content;
+    }
+    let marker = MetadataElem::new(Value::None)
+        .pack()
+        .labelled(change_marker_label());
+    Content::sequence([marker, content])
+}
+
+/// Restores the previous marking state when the body loop ends or unwinds.
+struct MarkChangesGuard(bool);
+
+impl MarkChangesGuard {
+    fn set(mark: bool) -> Self {
+        Self(MARK_CHANGES.with(|cell| cell.replace(mark)))
+    }
+}
+
+impl Drop for MarkChangesGuard {
+    fn drop(&mut self) {
+        MARK_CHANGES.with(|cell| cell.set(self.0));
+    }
+}
+
 fn flush_group(
     groups: &mut Vec<Content>,
     blocks: &mut Vec<Content>,
@@ -116,11 +157,15 @@ fn annotated_inline_content(word_ops: &[WordOp], compact_substitutions: bool) ->
                 trailing_separator,
             } => {
                 let joined = changed_token_sequence(tokens, leading_separator, trailing_separator);
-                inline.push(joined.styled(TextElem::fill.set(color.color().into())));
+                inline.push(with_change_marker(
+                    joined.styled(TextElem::fill.set(color.color().into())),
+                ));
             }
             WordRenderRun::Delete { tokens, visible } => {
                 if visible {
-                    inline.push(Content::sequence(tokens.iter().map(deleted_token_content)));
+                    inline.push(with_change_marker(Content::sequence(
+                        tokens.iter().map(deleted_token_content),
+                    )));
                 }
             }
         }
@@ -692,23 +737,46 @@ pub fn build_annotated_content_from_tree(
     result: &crate::diff::DiffResult,
     compact_substitutions: bool,
 ) -> Content {
+    build_marked_annotated_content_from_tree(result, compact_substitutions, false)
+}
+
+/// Like [`build_annotated_content_from_tree`]; with `mark_changes`, every
+/// visible change in the document body is prefixed with an invisible
+/// metadata marker labelled [`change_marker_label`].
+pub fn build_marked_annotated_content_from_tree(
+    result: &crate::diff::DiffResult,
+    compact_substitutions: bool,
+    mark_changes: bool,
+) -> Content {
     let mut no_debug_events = None;
-    build_annotated_content_from_tree_inner(result, compact_substitutions, &mut no_debug_events)
-        .expect("annotation without trace cannot fail")
+    build_annotated_content_from_tree_inner(
+        result,
+        compact_substitutions,
+        mark_changes,
+        &mut no_debug_events,
+    )
+    .expect("annotation without trace cannot fail")
 }
 
 pub fn build_annotated_content_from_tree_with_debug_events(
     result: &crate::diff::DiffResult,
     compact_substitutions: bool,
+    mark_changes: bool,
     debug_events: &mut dyn DebugEventSink,
 ) -> anyhow::Result<Content> {
     let mut debug_events = Some(debug_events);
-    build_annotated_content_from_tree_inner(result, compact_substitutions, &mut debug_events)
+    build_annotated_content_from_tree_inner(
+        result,
+        compact_substitutions,
+        mark_changes,
+        &mut debug_events,
+    )
 }
 
 fn build_annotated_content_from_tree_inner(
     result: &crate::diff::DiffResult,
     compact_substitutions: bool,
+    mark_changes: bool,
     debug_events: &mut Option<&mut dyn DebugEventSink>,
 ) -> anyhow::Result<Content> {
     let mut groups: Vec<Content> = Vec::new();
@@ -725,6 +793,9 @@ fn build_annotated_content_from_tree_inner(
             .reason(format!("count={}", page_region_updates.len())),
     )?;
 
+    // Page-region updates above are built without markers: header and footer
+    // changes alone do not make a page a changed page.
+    let _marking = MarkChangesGuard::set(mark_changes);
     for (index, block) in result.blocks.iter().enumerate() {
         let mut annotated_block = annotate_block_edit(block, compact_substitutions);
         apply_page_region_updates(
@@ -1096,7 +1167,7 @@ fn apply_realized_edit(
         }
         RealizedEdit::LogOnly(_) => {}
         RealizedEdit::MarkBaseInserted(_) => {
-            node.realized = apply_fill_inside(&node.realized, green());
+            node.realized = with_change_marker(apply_fill_inside(&node.realized, green()));
             node.annotation.patch_surface = None;
         }
     }
@@ -1140,16 +1211,16 @@ fn render_edit_content(content: &EditContent, compact: bool) -> Content {
             if content.plain_text().is_empty() {
                 strip_page_styles(content)
             } else {
-                strip_page_styles(&apply_fill_inside(content, green()))
+                with_change_marker(strip_page_styles(&apply_fill_inside(content, green())))
             }
         }
-        EditContent::Deleted(content) => {
-            strip_page_styles(&apply_delete_inside(content.as_content()))
-        }
-        EditContent::OpaqueReplacement { old, new } => Content::sequence([
+        EditContent::Deleted(content) => with_change_marker(strip_page_styles(
+            &apply_delete_inside(content.as_content()),
+        )),
+        EditContent::OpaqueReplacement { old, new } => with_change_marker(Content::sequence([
             framed_opaque_visual(&strip_page_styles(old.as_content()), red()),
             framed_opaque_visual(&strip_page_styles(new), green()),
-        ]),
+        ])),
         EditContent::Modified { base, word_ops } => {
             if let Some(raw) = render_raw_block_modified(base, word_ops, compact) {
                 strip_page_styles(&raw)

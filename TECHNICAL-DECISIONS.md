@@ -235,3 +235,13 @@ Tradeoff: an inline source child that realized into an earlier paragraph no long
 - Any other table keeps the generic slot diff.
 
 Tradeoff: the column count is read from the table's own `columns` field under the default style chain; a column count that only comes from a `set table(columns: ...)` rule is not seen and such tables fall back to one cell per row, which degrades to the cell-level alignment rather than mis-grouping cells.
+
+## Changed-Pages Mode Uses Body Change Markers
+
+- `--changed-pages-only` writes only the pages that contain a change in the document body. A page counts as changed when it holds a visible insertion, deletion, word change, opaque replacement or inserted-equation mark.
+- While the body blocks are annotated in this mode, each such change is prefixed with an invisible `metadata` element labelled `<typst-diff-change>`. After layout, the introspector's locations of these markers give the changed pages, and the PDF export receives them as `PdfOptions::page_ranges`. The layout itself is unchanged, so kept pages keep their page numbers and cross-references.
+- Header and footer updates (semantic page-region edits and rendered-region edits) are built before the markers are switched on. A version line or a "page x of y" footer that changes on every page therefore does not select pages.
+- The marker switch is a scoped thread-local, set only for the body loop of one annotation. Threading a flag through every annotation function would touch all edit renderers for a single cross-cutting option; the guard restores the previous state on return or unwind.
+- Without the flag no markers are emitted, so the default output is unchanged.
+
+Tradeoff: a marker sits where a change starts. A changed run that begins at the bottom of one page and continues on the next selects only the first page. Deleted text that is not rendered (compact mode) does not select a page.

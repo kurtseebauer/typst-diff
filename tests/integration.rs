@@ -6375,3 +6375,25 @@ fn spanning_table_cells_keep_generic_cell_diff() {
     let (deleted, _inserted) = collect_modified_word_texts(&result.blocks);
     assert!(deleted.contains("alt"), "{}", result.modification_log());
 }
+
+/// The changed-pages mode keeps only pages with changes in the document body.
+/// A footer change on every page (the version line) does not select a page.
+#[test]
+fn changed_pages_mode_ignores_footer_only_changes() {
+    let doc = |version: &str, page_two: &str| {
+        format!(
+            "#set page(footer: [Version {version} · Seite #context counter(page).display()])\n\
+             Erste Seite.\n#pagebreak()\n{page_two}\n#pagebreak()\nDritte Seite.\n"
+        )
+    };
+    let (_dir, world, result, _annotated) = diff_temp_sources_with_world(
+        &doc("1.2", "Zweite Seite alt."),
+        &doc("1.3", "Zweite Seite neu."),
+    );
+    let marked =
+        typst_diff::annotate::build_marked_annotated_content_from_tree(&result, false, true);
+    let rendered = typst_diff::render::render_changed_pages_to_pdf(&marked, &world).unwrap();
+    assert_valid_pdf(&rendered.bytes);
+    assert_eq!(rendered.total_pages, 3);
+    assert_eq!(rendered.pages, vec![2], "{}", result.modification_log());
+}

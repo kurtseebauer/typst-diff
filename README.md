@@ -90,6 +90,9 @@ Options:
                                 Write a plain-text log of every detected insertion,
                                 deletion, and modification
   -s, --compact-substitutions   Show substitutions as blue without red strikethrough
+  -p, --changed-pages-only      Only write pages with changes in the document body;
+                                header/footer changes (page numbers, version lines)
+                                do not count. Kept pages keep their page numbers.
       --debug                   Write structured diagnostics next to the output PDF
       --debug-trace             Write debug diagnostics plus detailed JSONL traces
   -h, --help                    Print help
