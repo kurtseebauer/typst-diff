@@ -241,12 +241,14 @@ Tradeoff: the column count is read from the table's own `columns` field under th
 ## Changed-Pages Mode Uses Body Change Markers
 
 - `--changed-pages-only` writes only the pages that contain a change in the document body. A page counts as changed when it holds a visible insertion, deletion, word change, opaque replacement or inserted-equation mark.
-- While the body blocks are annotated in this mode, each such change is prefixed with an invisible `metadata` element labelled `<typst-diff-change>`. After layout, the introspector's locations of these markers give the changed pages, and the PDF export receives them as `PdfOptions::page_ranges`. The layout itself is unchanged, so kept pages keep their page numbers and cross-references.
+- While the body blocks are annotated in this mode, each such change is enclosed in two invisible `metadata` elements labelled `<typst-diff-change>` that carry the change's number. After layout, the introspector's locations of each pair give the pages from the change's first to its last page, and the PDF export receives the union as `PdfOptions::page_ranges`. The layout itself is unchanged, so kept pages keep their page numbers and cross-references.
 - Header and footer updates (semantic page-region edits and rendered-region edits) are built before the markers are switched on. A version line or a "page x of y" footer that changes on every page therefore does not select pages.
 - The marker switch is a scoped thread-local, set only for the body loop of one annotation. Threading a flag through every annotation function would touch all edit renderers for a single cross-cutting option; the guard restores the previous state on return or unwind.
 - Without the flag no markers are emitted, so the default output is unchanged.
 
-Tradeoff: a marker sits where a change starts. A changed run that begins at the bottom of one page and continues on the next selects only the first page. Deleted text that is not rendered (compact mode) does not select a page.
+- Outlines do not select pages. Realization emits an outline's title and entries as top-level blocks between the outline's own start and end introspection tags, so the annotation loop tracks those tags and builds the blocks between them without markers. An outline changes wherever a heading or a page number moves; its pages would otherwise always count as changed.
+
+Tradeoff: deleted text that is not rendered (compact mode) does not select a page. A change inside an outline is still marked in the output, but its page is kept only if it holds another change.
 
 ## Document Set Rules Live On The Output Root
 

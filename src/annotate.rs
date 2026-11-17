@@ -21,7 +21,7 @@ use std::cell::Cell;
 
 use typst::foundations::{Content, Label, NativeElement, Smart, Style, Styles, Value};
 use typst::foundations::{SequenceElem, StyleChain, StyledElem};
-use typst::introspection::MetadataElem;
+use typst::introspection::{Location, MetadataElem, Tag, TagElem};
 use typst::layout::{
     Abs, AlignElem, BlockBody, BlockElem, BoxElem, ColumnsElem, HideElem, PadElem, PageElem,
     PlaceElem, Rel, Sides,
@@ -29,8 +29,8 @@ use typst::layout::{
 use typst::math::{CancelElem, EquationElem};
 use typst::model::{
     EmphElem, EnumElem, EnumItem, FigureCaption, FigureElem, FootnoteBody, FootnoteElem,
-    HeadingElem, LinkElem, ListElem, ListItem, ParElem, ParbreakElem, StrongElem, TermItem,
-    TermsElem,
+    HeadingElem, LinkElem, ListElem, ListItem, OutlineElem, ParElem, ParbreakElem, StrongElem,
+    TermItem, TermsElem,
 };
 use typst::text::{HighlightElem, LinebreakElem, RawLine, SpaceElem, StrikeElem, TextElem};
 use typst::visualize::{CircleElem, Color, EllipseElem, RectElem, Stroke};
@@ -80,24 +80,34 @@ impl ChangeColor {
 thread_local! {
     /// Set while the body blocks of a marked annotation are built.
     static MARK_CHANGES: Cell<bool> = const { Cell::new(false) };
+    /// Number of the next change marked in the current annotation.
+    static NEXT_CHANGE: Cell<i64> = const { Cell::new(0) };
 }
 
-/// Label of the invisible markers that a marked annotation places at every
-/// visible change in the document body (not in headers or footers).
+/// Label of the invisible markers that a marked annotation places around
+/// every visible change in the document body (not in headers or footers).
+///
+/// Each change gets a marker before and after it; both carry the change's
+/// number as their metadata value, so a change that crosses a page break
+/// selects every page from its first to its last.
 pub fn change_marker_label() -> Label {
     Label::new(typst::utils::PicoStr::intern("typst-diff-change"))
         .expect("marker label is not empty")
 }
 
-/// Prefix `content` with a change marker when building a marked annotation.
+/// Enclose `content` in a pair of change markers when building a marked
+/// annotation.
 fn with_change_marker(content: Content) -> Content {
     if !MARK_CHANGES.with(Cell::get) {
         return content;
     }
-    let marker = MetadataElem::new(Value::None)
-        .pack()
-        .labelled(change_marker_label());
-    Content::sequence([marker, content])
+    let change = NEXT_CHANGE.with(|next| next.replace(next.get() + 1));
+    let marker = || {
+        MetadataElem::new(Value::Int(change))
+            .pack()
+            .labelled(change_marker_label())
+    };
+    Content::sequence([marker(), content, marker()])
 }
 
 /// Restores the previous marking state when the body loop ends or unwinds.
@@ -112,6 +122,38 @@ impl MarkChangesGuard {
 impl Drop for MarkChangesGuard {
     fn drop(&mut self) {
         MARK_CHANGES.with(|cell| cell.set(self.0));
+    }
+}
+
+/// The outlines that enclose the current body block.
+///
+/// Realization emits an outline's title and entries as top-level blocks
+/// between the outline's start and end introspection tags, which are body
+/// blocks of their own. An outline changes wherever a heading or a page
+/// number moves, so its pages do not count as changed pages.
+#[derive(Default)]
+struct OutlineScope(Vec<Location>);
+
+impl OutlineScope {
+    /// Track `block` and return whether it belongs to an outline.
+    fn enter(&mut self, block: &Content) -> bool {
+        let mut content = block;
+        while let Some(styled) = content.to_packed::<StyledElem>() {
+            content = &styled.child;
+        }
+        match content.to_packed::<TagElem>().map(|elem| &elem.tag) {
+            Some(Tag::Start(elem, _)) if elem.is::<OutlineElem>() => {
+                if let Some(location) = elem.location() {
+                    self.0.push(location);
+                }
+                true
+            }
+            Some(Tag::End(location, ..)) if self.0.last() == Some(location) => {
+                self.0.pop();
+                true
+            }
+            _ => !self.0.is_empty(),
+        }
     }
 }
 
@@ -795,9 +837,13 @@ fn build_annotated_content_from_tree_inner(
 
     // Page-region updates above are built without markers: header and footer
     // changes alone do not make a page a changed page.
-    let _marking = MarkChangesGuard::set(mark_changes);
+    let mut outlines = OutlineScope::default();
+    NEXT_CHANGE.with(|next| next.set(0));
     for (index, block) in result.blocks.iter().enumerate() {
+        let in_outline = outlines.enter(&block.base.realized);
+        let marking = MarkChangesGuard::set(mark_changes && !in_outline);
         let mut annotated_block = annotate_block_edit(block, compact_substitutions);
+        drop(marking);
         apply_page_region_updates(
             &mut annotated_block.page_styles,
             &page_region_updates,

@@ -1,12 +1,12 @@
 //! Render annotated [`Content`] to PDF bytes.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
 
 use anyhow::Result;
 use typst::World;
 use typst::foundations::{Content, Selector};
-use typst::introspection::Introspector;
+use typst::introspection::{Introspector, MetadataElem};
 use typst::layout::PageRanges;
 use typst_pdf::{PdfOptions, pdf};
 
@@ -35,23 +35,44 @@ pub struct ChangedPagesPdf {
 
 /// Lay out `content` (built by
 /// [`crate::annotate::build_marked_annotated_content_from_tree`] with
-/// markers) and export only the pages that carry a change marker.
+/// markers) and export only the pages that hold a marked change.
 ///
-/// Markers sit only at changes in the document body, so a page whose only
-/// change is in its header or footer (page numbers, version line) is left
-/// out. The kept pages keep their original page numbers in the output.
+/// Markers sit only around changes in the document body, so a page whose
+/// only change is in its header or footer (page numbers, version line) is
+/// left out. A change selects every page from its opening to its closing
+/// marker. The kept pages keep their original page numbers in the output.
 pub fn render_changed_pages_to_pdf(
     content: &Content,
     world: &dyn World,
 ) -> Result<ChangedPagesPdf> {
     let document = crate::eval::layout_document(world, content)?;
     let introspector = document.introspector();
-    let pages: BTreeSet<usize> = introspector
-        .query(&Selector::Label(crate::annotate::change_marker_label()))
-        .iter()
-        .filter_map(|marker| marker.location())
-        .filter_map(|location| introspector.page(location))
-        .map(NonZeroUsize::get)
+    let mut spans: BTreeMap<i64, (usize, usize)> = BTreeMap::new();
+    for marker in introspector.query(&Selector::Label(crate::annotate::change_marker_label())) {
+        let Some(change) = marker
+            .to_packed::<MetadataElem>()
+            .and_then(|marker| marker.value.clone().cast::<i64>().ok())
+        else {
+            continue;
+        };
+        let Some(page) = marker
+            .location()
+            .and_then(|location| introspector.page(location))
+            .map(NonZeroUsize::get)
+        else {
+            continue;
+        };
+        spans
+            .entry(change)
+            .and_modify(|(first, last)| {
+                *first = (*first).min(page);
+                *last = (*last).max(page);
+            })
+            .or_insert((page, page));
+    }
+    let pages: BTreeSet<usize> = spans
+        .values()
+        .flat_map(|&(first, last)| first..=last)
         .collect();
     let total_pages = document.pages().len();
     let ranges = (!pages.is_empty()).then(|| {

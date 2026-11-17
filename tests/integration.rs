@@ -6537,3 +6537,35 @@ fn cli_without_root_cannot_resolve_absolute_imports() {
 
     assert!(!cli.status.success());
 }
+
+#[test]
+fn changed_pages_mode_ignores_outline_changes() {
+    let doc = |heading: &str| {
+        format!("#outline()\n#pagebreak()\n= {heading}\nText.\n#pagebreak()\n= Rest\nMehr.\n")
+    };
+    let (_dir, world, result, _annotated) =
+        diff_temp_sources_with_world(&doc("Alter Titel"), &doc("Neuer Titel"));
+    let marked =
+        typst_diff::annotate::build_marked_annotated_content_from_tree(&result, false, true);
+    let rendered = typst_diff::render::render_changed_pages_to_pdf(&marked, &world).unwrap();
+    assert_eq!(rendered.total_pages, 3);
+    assert_eq!(rendered.pages, vec![2], "{}", result.modification_log());
+}
+
+#[test]
+fn changed_pages_mode_keeps_every_page_of_a_change() {
+    let long =
+        "Dieser neue Absatz ist lang genug, um über das Seitenende hinaus zu laufen. ".repeat(12);
+    let doc = |middle: &str| {
+        format!(
+            "#set page(width: 8cm, height: 6cm)\nErste Seite.\n#pagebreak()\nAnfang.\n\n{middle}\n\nEnde.\n"
+        )
+    };
+    let (_dir, world, result, _annotated) = diff_temp_sources_with_world(&doc(""), &doc(&long));
+    let marked =
+        typst_diff::annotate::build_marked_annotated_content_from_tree(&result, false, true);
+    let rendered = typst_diff::render::render_changed_pages_to_pdf(&marked, &world).unwrap();
+    assert!(rendered.total_pages >= 4, "pages: {}", rendered.total_pages);
+    let expected: Vec<usize> = (2..=rendered.total_pages).collect();
+    assert_eq!(rendered.pages, expected, "{}", result.modification_log());
+}
