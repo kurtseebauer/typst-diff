@@ -6397,3 +6397,50 @@ fn changed_pages_mode_ignores_footer_only_changes() {
     assert_eq!(rendered.total_pages, 3);
     assert_eq!(rendered.pages, vec![2], "{}", result.modification_log());
 }
+
+#[test]
+fn template_document_set_rule_survives_changed_footnote() {
+    // Realized blocks carried the template's `set document` rule in their style
+    // chain. A changed footnote moves word tokens with that chain into the
+    // paragraph body, where Typst rejects document set rules.
+    let doc = |note: &str| {
+        format!(
+            "#let t(body) = {{\n  set document(title: \"Antrag\", author: \"Marchl\")\n  body\n}}\n\
+             #show: t\nText#footnote[{note}] mehr.\n"
+        )
+    };
+    let (_dir, world, _result, annotated) = diff_temp_sources_with_world(&doc("alt"), &doc("neu"));
+    let document = typst_diff::eval::layout_document(&world, &annotated).unwrap();
+    let info = typst::model::Document::info(&document);
+    assert_eq!(info.title.as_deref(), Some("Antrag"));
+    assert_eq!(info.author, vec!["Marchl"]);
+}
+
+#[test]
+fn template_document_set_rule_keeps_table_rows_diffable() {
+    // A style wrapper for the document set rules around the realized root
+    // changes how the root's children are annotated: after a changed title
+    // page, the changed table became an opaque replacement.
+    let doc = |version: &str, cell: &str| {
+        format!(
+            "#let t(body) = {{\n  set document(title: \"Antrag\", keywords: (\"Version {version}\",))\n  \
+             set heading(numbering: \"1.1\")\n  align(center)[#image(\"logo.svg\", width: 2cm) #text(20pt)[Antrag] \\ Version {version}]\n  \
+             pagebreak()\n  body\n}}\n#show: t\n= Abschnitt <ziel>\n\
+             #table(columns: 2, [A], [siehe @ziel], [B], [{cell}])\n"
+        )
+    };
+    let (dir, old_world, new_world) =
+        temp_worlds(&doc("1.2", "alter Wert"), &doc("1.3", "neuer Wert"));
+    std::fs::write(
+        dir.path().join("logo.svg"),
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\">\
+         <rect width=\"10\" height=\"10\"/></svg>",
+    )
+    .unwrap();
+    let old = typst_diff::eval_to_realized_content(&old_world).unwrap();
+    let new = typst_diff::eval_to_realized_content(&new_world).unwrap();
+    let result = typst_diff::diff::diff_annotated(&old, &new);
+    let log = result.modification_log();
+    assert!(!log.contains("[opaque visual content]"), "{log}");
+    assert!(log.contains("deleted: alter") && log.contains("inserted: neuer"), "{log}");
+}

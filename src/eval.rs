@@ -14,22 +14,23 @@
 //! with identical text but different show rules would look identical in the diff.
 
 use anyhow::Result;
+use std::collections::HashSet;
 use std::sync::Arc;
 use typst::World;
 use typst::comemo::Track;
 use typst::diag::{FileError, FileResult};
 use typst::engine::{Engine, Route, Sink, Traced};
 use typst::foundations::{
-    Bytes, Content, Datetime, Duration, NativeElement, Style, StyleChain, Styles, Target,
-    TargetElem,
+    Bytes, Content, Datetime, Duration, NativeElement, SequenceElem, Style, StyleChain, StyledElem,
+    Styles, Target, TargetElem,
 };
 use typst::introspection::{EmptyIntrospector, Introspector, Locator};
 use typst::layout::{PageElem, PagebreakElem};
-use typst::model::{DocumentInfo, FootnoteElem};
+use typst::model::{DocumentElem, DocumentInfo, FootnoteElem};
 use typst::routines::{Arenas, RealizationKind};
 use typst::syntax::{FileId, Source};
 use typst::text::{Font, FontBook};
-use typst::utils::{LazyHash, Protected};
+use typst::utils::{LazyHash, Protected, hash128};
 use typst::{Library, LibraryExt};
 use typst_kit::fonts::FontStore;
 use typst_layout::{PagedDocument, PagedIntrospector};
@@ -204,10 +205,14 @@ fn realize_and_annotate(
     pre_content: &Content,
 ) -> Result<crate::annotated::AnnotatedContent> {
     let introspector = layout_introspector(world, pre_content)?;
-    let realized_content = realize_to_content(world, pre_content, introspector)?;
-    let mut annotated = crate::annotated::annotate_realized(pre_content, &realized_content);
-    crate::annotated::annotate_equation_origins(pre_content, &mut annotated);
-    let footnotes = collect_footnotes(pre_content);
+    let realized = realize_to_content(world, pre_content, introspector)?;
+    // Annotation keeps pre-tree content as edit surfaces, which the output
+    // places inside paragraphs and other containers.
+    let pre_content = without_document_styles(pre_content);
+    let mut annotated = crate::annotated::annotate_realized(&pre_content, &realized.content);
+    annotated.annotation.document_styles = realized.document_styles;
+    crate::annotated::annotate_equation_origins(&pre_content, &mut annotated);
+    let footnotes = collect_footnotes(&pre_content);
     let mut next = 0;
     crate::annotated::annotate_footnote_markers(&mut annotated, &footnotes, &mut next);
     Ok(annotated)
@@ -335,7 +340,7 @@ fn realize_to_content(
     world: &dyn World,
     content: &Content,
     introspector: Arc<PagedIntrospector>,
-) -> Result<Content> {
+) -> Result<Realized> {
     crate::context_recording::clear();
     let library = diff_library(world);
     let target = TargetElem::target.set(Target::Paged).wrap();
@@ -378,17 +383,92 @@ fn realize_to_content(
         ));
     }
 
+    let mut document_styles = Styles::new();
+    let mut seen_document_styles = HashSet::new();
     let realized = Content::sequence(realized.iter().map(|(realized_content, styles)| {
+        let styles = styles.to_map();
+        collect_document_styles(&styles, &mut seen_document_styles, &mut document_styles);
         let styles = if realized_content.is::<PagebreakElem>() {
-            marginal_styles(&styles.to_map())
+            marginal_styles(&styles)
         } else {
-            non_page_styles(styles.to_map())
+            non_page_styles(styles)
         };
         (*realized_content).clone().styled_with_map(styles)
-    }))
-    .styled_with_map(root_page_styles);
+    }));
+    Ok(Realized {
+        content: realized.styled_with_map(root_page_styles),
+        document_styles,
+    })
+}
 
-    Ok(realized)
+/// The realized tree and the document set rules lifted out of it.
+struct Realized {
+    content: Content,
+    /// See [`collect_document_styles`].
+    document_styles: Styles,
+}
+
+/// Append the document set rules of `styles` that are not in `seen` yet.
+///
+/// Document set rules only fill the PDF metadata and are only allowed at the
+/// top level of a document. Every realized block carries them in its style
+/// chain, but the diff output moves block content into paragraphs, footnotes
+/// and other containers, where Typst rejects them. They are therefore lifted
+/// out of the realized tree, which keeps its shape, and stored on the root
+/// annotation ([`crate::annotated::Annotation::document_styles`]).
+fn collect_document_styles(styles: &Styles, seen: &mut HashSet<u128>, out: &mut Styles) {
+    for style in styles.iter().filter(|style| is_document_style(style)) {
+        if seen.insert(hash128(style)) {
+            out.push(style.clone());
+        }
+    }
+}
+
+/// `content` without the document set rules of its top-level style wrappers.
+///
+/// Document set rules are only valid at the top level, so only sequences and
+/// style wrappers are descended into. Unchanged content is returned as is.
+fn without_document_styles(content: &Content) -> Content {
+    let mut result = content.clone();
+    strip_document_styles(&mut result);
+    result
+}
+
+/// Remove the document set rules below `content`, cloning only the nodes on
+/// the way to them.
+fn strip_document_styles(content: &mut Content) {
+    if !has_document_styles(content) {
+        return;
+    }
+    if let Some(seq) = content.to_packed_mut::<SequenceElem>() {
+        for child in &mut seq.children {
+            strip_document_styles(child);
+        }
+    } else if let Some(styled) = content.to_packed_mut::<StyledElem>() {
+        styled.styles = styled
+            .styles
+            .iter()
+            .filter(|style| !is_document_style(style))
+            .cloned()
+            .map(Style::wrap)
+            .collect();
+        strip_document_styles(&mut styled.child);
+    }
+}
+
+fn has_document_styles(content: &Content) -> bool {
+    if let Some(seq) = content.to_packed::<SequenceElem>() {
+        return seq.children.iter().any(has_document_styles);
+    }
+    content.to_packed::<StyledElem>().is_some_and(|styled| {
+        styled.styles.iter().any(is_document_style) || has_document_styles(&styled.child)
+    })
+}
+
+fn is_document_style(style: &Style) -> bool {
+    style
+        .element()
+        .is_some_and(|element| element == DocumentElem::ELEM)
 }
 
 /// Collect all `FootnoteElem` nodes in document order from the pre-realization tree.
@@ -408,10 +488,12 @@ fn collect_footnotes(content: &Content) -> Vec<Content> {
     footnotes
 }
 
-/// Strip `PageElem` styles from a style map, keeping only inline/block styles.
+/// Strip `PageElem` and document styles from a style map, keeping only
+/// inline/block styles.
 ///
 /// Page styles must not be re-applied at the block level; they are handled
-/// separately per style group in `build_annotated_content`.
+/// separately per style group in `build_annotated_content`. Document styles
+/// are lifted out (see [`collect_document_styles`]).
 fn non_page_styles(styles: Styles) -> Styles {
     styles
         .iter()
@@ -419,6 +501,7 @@ fn non_page_styles(styles: Styles) -> Styles {
             style
                 .element()
                 .is_none_or(|element| element != PageElem::ELEM)
+                && !is_document_style(style)
         })
         .cloned()
         .map(Style::wrap)
@@ -445,7 +528,7 @@ fn marginal_styles(styles: &Styles) -> Styles {
             style
                 .element()
                 .is_some_and(|element| element == PageElem::ELEM)
-                || (style.outside() && style.liftable())
+                || (style.outside() && style.liftable() && !is_document_style(style))
         })
         .cloned()
         .map(Style::wrap)

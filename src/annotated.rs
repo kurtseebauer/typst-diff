@@ -7,7 +7,7 @@
 
 use crate::container_ops::{self, ContainerKind};
 use std::collections::VecDeque;
-use typst::foundations::{Content, ContextElem, SequenceElem, StyleChain, StyledElem};
+use typst::foundations::{Content, ContextElem, SequenceElem, StyleChain, StyledElem, Styles};
 use typst::introspection::{Tag, TagElem};
 use typst::layout::{BlockBody, BlockElem, PagebreakElem};
 use typst::math::EquationElem;
@@ -100,6 +100,10 @@ pub struct Annotation {
     pub equation_origins: Vec<Content>,
     /// Source span for diagnostics (not used as a lookup key).
     pub span: Span,
+    /// The document's `set document` rules. Only the root node carries them:
+    /// they are lifted out of the realized blocks, because Typst rejects them
+    /// anywhere but at the top level of the output document.
+    pub document_styles: Styles,
 }
 
 impl Default for Annotation {
@@ -111,6 +115,7 @@ impl Default for Annotation {
             patch_surface: None,
             equation_origins: vec![],
             span: Span::detached(),
+            document_styles: Styles::new(),
         }
     }
 }
@@ -1131,9 +1136,8 @@ fn annotate_container(pre: &Content, realized: &Content, kind: ContainerKind) ->
             semantic_kind: Some(semantic_kind),
             slots: mapping.slots,
             patch_surface,
-            equation_origins: vec![],
             span: pre.span(),
-            footnote: None,
+            ..Annotation::default()
         },
         children: mapping.children,
     }

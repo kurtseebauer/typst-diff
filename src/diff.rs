@@ -1717,6 +1717,7 @@ fn is_page_style(style: &Style) -> bool {
 /// Diff result for the annotated realized-tree pipeline.
 pub struct DiffResult {
     pub blocks: Vec<DiffBlockEdit>,
+    /// Root page styles and document set rules of the new document.
     pub root_styles: Styles,
     pub regions: Vec<DiffRegionEdit>,
     pub rendered_regions: Vec<RenderedRegionEdit>,
@@ -3535,7 +3536,8 @@ fn diff_annotated_inner_with_events(
         PipelineTraceEvent::new("diff/page-region", "semantic_complete")
             .reason(format!("region_count={}", regions.len())),
     )?;
-    let root_styles = sanitize_page_styles(root_page_styles_raw(&new.realized));
+    let mut root_styles = sanitize_page_styles(root_page_styles_raw(&new.realized));
+    root_styles.apply(new.annotation.document_styles.clone());
 
     let mut layout = LayoutCursor::new(&prepared.new_layout_blocks);
     let mut old_owners = BlockOwnerCursor::new(old);

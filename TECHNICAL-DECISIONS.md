@@ -247,3 +247,12 @@ Tradeoff: the column count is read from the table's own `columns` field under th
 - Without the flag no markers are emitted, so the default output is unchanged.
 
 Tradeoff: a marker sits where a change starts. A changed run that begins at the bottom of one page and continues on the next selects only the first page. Deleted text that is not rendered (compact mode) does not select a page.
+
+## Document Set Rules Live On The Output Root
+
+- Typst accepts `set document(...)` only at the top level of a document. A template that sets it puts the rule into the style chain of every realized block, and into the style wrapper of the template body in the pre-realization tree. The diff output moves both into containers: word tokens keep their block styles inside paragraph bodies, and footnote paragraphs use pre-tree runs as edit surfaces. Layout then failed with "document set rules are not allowed inside of containers".
+- Realization still runs with the rules, so the document's own realization (including anything that reads `document.title`) is unchanged. Afterwards `realize_to_content` collects the distinct document rules from the realized blocks' style chains in order and drops them from the blocks; annotation receives a pre tree whose top-level style wrappers no longer carry them.
+- The collected rules are stored in `Annotation::document_styles` on the root node and added to `DiffResult::root_styles` from the new document. The annotated output applies them on its top-level style wrapper, so the diff PDF carries the new document's title, author and keywords.
+- The rules are deliberately not put on a style wrapper around the realized root: that wrapper changes how the root's children are annotated (the root path materializes style-dependent fields), and after a changed title page a changed table became an opaque replacement.
+
+Tradeoff: the PDF metadata is always that of the new document; a change of title or keywords does not appear in the diff body.
