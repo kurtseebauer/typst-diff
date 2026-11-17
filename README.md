@@ -70,6 +70,13 @@ typst-diff main.typ --revision HEAD~1
 typst-diff main.typ --revision v1.0 -o since-v1.pdf
 ```
 
+**Project root for absolute imports** (`#import "/templates/template.typ"`),
+as with `typst compile --root`:
+```sh
+typst-diff docs/report.typ --revision main --root .
+typst-diff old/docs/report.typ new/docs/report.typ --old-root old --root new
+```
+
 Run `typst-diff --help` for the full option list.
 
 ## Options
@@ -85,6 +92,12 @@ Arguments:
 
 Options:
   -r, --revision <REV>          Compare the working-tree file against this Git revision
+      --root <DIR>              Project root for absolute paths such as
+                                /templates/template.typ (default: the directory of
+                                each document). With --revision, the same directory
+                                of the Git snapshot is the old root
+      --old-root <DIR>          Project root of the old document when it lies in a
+                                different checkout (default: --root)
   -o, --output <PATH>           Output PDF path [default: diff.pdf]
   -l, --log-modifications <PATH>
                                 Write a plain-text log of every detected insertion,

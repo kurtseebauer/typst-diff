@@ -6442,5 +6442,98 @@ fn template_document_set_rule_keeps_table_rows_diffable() {
     let result = typst_diff::diff::diff_annotated(&old, &new);
     let log = result.modification_log();
     assert!(!log.contains("[opaque visual content]"), "{log}");
-    assert!(log.contains("deleted: alter") && log.contains("inserted: neuer"), "{log}");
+    assert!(
+        log.contains("deleted: alter") && log.contains("inserted: neuer"),
+        "{log}"
+    );
+}
+
+fn write_rooted_project(root: &std::path::Path, template_text: &str) {
+    std::fs::create_dir_all(root.join("docs")).unwrap();
+    std::fs::create_dir_all(root.join("templates")).unwrap();
+    std::fs::write(
+        root.join("docs/main.typ"),
+        "#import \"/templates/t.typ\": t\n#show: t\nBody text.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("templates/t.typ"),
+        format!("#let t(body) = [{template_text}\n\n#body]\n"),
+    )
+    .unwrap();
+}
+
+#[test]
+fn cli_revision_mode_maps_root_into_snapshot() {
+    let dir = tempfile::TempDir::new().unwrap();
+    write_rooted_project(dir.path(), "Alter Kopf.");
+    git(dir.path(), &["init"]);
+    git(dir.path(), &["config", "user.email", "test@example.com"]);
+    git(dir.path(), &["config", "user.name", "Typst Diff Test"]);
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-m", "old"]);
+    write_rooted_project(dir.path(), "Neuer Kopf.");
+
+    let output = dir.path().join("diff.pdf");
+    let log = dir.path().join("diff.log");
+    let cli = Command::new(env!("CARGO_BIN_EXE_typst-diff"))
+        .current_dir(dir.path().join("docs"))
+        .args(["main.typ", "--revision", "HEAD", "--root", ".."])
+        .arg("-o")
+        .arg(&output)
+        .arg("-l")
+        .arg(&log)
+        .output()
+        .unwrap();
+
+    assert_command_success(cli, "typst-diff --revision --root");
+    let log = std::fs::read_to_string(log).unwrap();
+    assert!(log.contains("deleted: Alter"), "{log}");
+    assert!(log.contains("inserted: Neuer"), "{log}");
+}
+
+#[test]
+fn cli_old_root_serves_separate_checkouts() {
+    let dir = tempfile::TempDir::new().unwrap();
+    write_rooted_project(&dir.path().join("old"), "Alter Kopf.");
+    write_rooted_project(&dir.path().join("new"), "Neuer Kopf.");
+
+    let output = dir.path().join("diff.pdf");
+    let log = dir.path().join("diff.log");
+    let cli = Command::new(env!("CARGO_BIN_EXE_typst-diff"))
+        .current_dir(dir.path())
+        .args([
+            "old/docs/main.typ",
+            "new/docs/main.typ",
+            "--old-root",
+            "old",
+            "--root",
+            "new",
+        ])
+        .arg("-o")
+        .arg(&output)
+        .arg("-l")
+        .arg(&log)
+        .output()
+        .unwrap();
+
+    assert_command_success(cli, "typst-diff --old-root --root");
+    let log = std::fs::read_to_string(log).unwrap();
+    assert!(log.contains("deleted: Alter"), "{log}");
+    assert!(log.contains("inserted: Neuer"), "{log}");
+}
+
+#[test]
+fn cli_without_root_cannot_resolve_absolute_imports() {
+    let dir = tempfile::TempDir::new().unwrap();
+    write_rooted_project(&dir.path().join("old"), "Alter Kopf.");
+    write_rooted_project(&dir.path().join("new"), "Neuer Kopf.");
+
+    let cli = Command::new(env!("CARGO_BIN_EXE_typst-diff"))
+        .current_dir(dir.path())
+        .args(["old/docs/main.typ", "new/docs/main.typ", "-o", "diff.pdf"])
+        .output()
+        .unwrap();
+
+    assert!(!cli.status.success());
 }

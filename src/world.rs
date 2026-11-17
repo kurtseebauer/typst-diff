@@ -68,15 +68,34 @@ pub(crate) fn project_file_id(path: &str) -> Result<FileId> {
     Ok(RootedPath::new(VirtualRoot::Project, vpath).intern())
 }
 
+/// The virtual path of `entry` below the project `root` (both canonical),
+/// e.g. `/certification/doc.typ`.
+fn virtual_entry_path(entry: &Path, root: &Path) -> Result<String> {
+    let relative = entry
+        .strip_prefix(root)
+        .map_err(|_| anyhow::anyhow!("{entry:?} is not inside the root directory {root:?}"))?;
+    let mut path = String::new();
+    for component in relative.components() {
+        let component = component
+            .as_os_str()
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("path is not valid UTF-8: {relative:?}"))?;
+        path.push('/');
+        path.push_str(component);
+    }
+    Ok(path)
+}
+
 /// A Typst [`World`] that reads source and binary files from the local filesystem.
 ///
-/// All virtual paths are rooted at the directory containing the entry file.
+/// All virtual paths are rooted at the project root: by default the directory
+/// containing the entry file (see [`SystemWorld::with_root`]).
 /// Files are cached after the first read so repeated accesses are free.
 pub struct SystemWorld {
-    /// Resolves project files (rooted at the directory containing the entry
-    /// file) and package files (downloaded on demand) to paths on disk.
+    /// Resolves project files (below the project root) and package files
+    /// (downloaded on demand) to paths on disk.
     files: SystemFiles,
-    /// The virtual [`FileId`] assigned to the entry file (always `/<filename>`).
+    /// The virtual [`FileId`] of the entry file, relative to the project root.
     main: FileId,
     library: LazyHash<Library>,
     fonts: FontStore,
@@ -92,20 +111,30 @@ impl SystemWorld {
     /// The entry file is pre-loaded into the source cache; if it cannot be read
     /// (e.g. the path doesn't exist) an error is returned immediately.
     pub fn new(entry: impl AsRef<Path>) -> Result<Self> {
+        Self::with_root(entry, None)
+    }
+
+    /// Create a world whose project root is `root`, or `entry`'s parent
+    /// directory when `root` is `None`, like `typst compile --root`.
+    ///
+    /// Absolute paths in the document (`/templates/template.typ`) resolve
+    /// against the root, and no file outside it can be read. `entry` must lie
+    /// inside the root.
+    pub fn with_root(entry: impl AsRef<Path>, root: Option<&Path>) -> Result<Self> {
         let entry = entry
             .as_ref()
             .canonicalize()
             .with_context(|| format!("cannot find {:?}", entry.as_ref()))?;
-        let root = entry
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("entry path has no parent: {:?}", entry))?
-            .to_owned();
-        let filename = entry
-            .file_name()
-            .ok_or_else(|| anyhow::anyhow!("entry path has no filename: {:?}", entry))?
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("filename is not valid UTF-8: {:?}", entry))?;
-        let main = project_file_id(&format!("/{filename}"))?;
+        let root = match root {
+            Some(root) => root
+                .canonicalize()
+                .with_context(|| format!("cannot find root directory {root:?}"))?,
+            None => entry
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("entry path has no parent: {:?}", entry))?
+                .to_owned(),
+        };
+        let main = project_file_id(&virtual_entry_path(&entry, &root)?)?;
 
         let world = Self {
             files: SystemFiles::new(
@@ -129,7 +158,7 @@ impl SystemWorld {
     ///
     /// For package files, the package is downloaded (once) into the package
     /// cache and the returned root is the unpacked package directory. For
-    /// project files, the root is the directory containing the entry file.
+    /// project files, the root is the project root.
     fn disk_path(&self, id: FileId) -> FileResult<PathBuf> {
         self.files.resolve(id)
     }
@@ -206,6 +235,41 @@ mod tests {
         let ch_id = project_file_id("/ch.typ").unwrap();
         let src = world.source(ch_id).unwrap();
         assert_eq!(src.text(), "Chapter text");
+    }
+
+    #[test]
+    fn root_resolves_absolute_paths_and_nested_entry() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("docs/sub")).unwrap();
+        fs::create_dir_all(dir.path().join("templates")).unwrap();
+        fs::write(
+            dir.path().join("docs/sub/main.typ"),
+            "#import \"/templates/t.typ\": x\n#x",
+        )
+        .unwrap();
+        fs::write(dir.path().join("templates/t.typ"), "#let x = [Template]").unwrap();
+        let world =
+            SystemWorld::with_root(dir.path().join("docs/sub/main.typ"), Some(dir.path())).unwrap();
+
+        assert_eq!(world.main(), project_file_id("/docs/sub/main.typ").unwrap());
+        let content = crate::eval::eval_to_content(&world).unwrap();
+        assert_eq!(content.plain_text(), "Template");
+    }
+
+    #[test]
+    fn root_must_contain_entry() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("a")).unwrap();
+        fs::create_dir_all(dir.path().join("b")).unwrap();
+        fs::write(dir.path().join("a/main.typ"), "").unwrap();
+        let err = match SystemWorld::with_root(
+            dir.path().join("a/main.typ"),
+            Some(&dir.path().join("b")),
+        ) {
+            Ok(_) => panic!("entry outside the root should fail"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("not inside the root"), "{err}");
     }
 
     #[test]

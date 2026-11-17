@@ -21,6 +21,15 @@ struct Args {
     /// Compare the working-tree file against this Git revision
     #[arg(short = 'r', long)]
     revision: Option<String>,
+    /// Project root for absolute paths such as /templates/template.typ, as in
+    /// `typst compile --root` (default: the directory of each document). With
+    /// --revision, the same directory of the Git snapshot is the old root
+    #[arg(long, value_name = "DIR")]
+    root: Option<PathBuf>,
+    /// Project root of the old document when it lies in a different checkout
+    /// than the new one (default: --root)
+    #[arg(long, value_name = "DIR", conflicts_with = "revision")]
+    old_root: Option<PathBuf>,
     /// Output PDF path
     #[arg(short, long, default_value = "diff.pdf")]
     output: PathBuf,
@@ -49,11 +58,11 @@ fn main() -> Result<()> {
 
     eprintln!("typst-diff build: {}", build_info::build_report_line());
     eprintln!("Loading old document: {}", inputs.old.display());
-    let old_world = world::SystemWorld::new(&inputs.old)
+    let old_world = world::SystemWorld::with_root(&inputs.old, inputs.old_root.as_deref())
         .with_context(|| format!("failed to load old document {:?}", inputs.old))?;
 
     eprintln!("Loading new document: {}", inputs.new.display());
-    let new_world = world::SystemWorld::new(&inputs.new)
+    let new_world = world::SystemWorld::with_root(&inputs.new, inputs.new_root.as_deref())
         .with_context(|| format!("failed to load new document {:?}", inputs.new))?;
 
     run_pipeline(&args, &inputs, &old_world, &new_world)
@@ -334,6 +343,8 @@ fn debug_args(args: &Args) -> debug::DebugArgs {
         old_or_file: args.old_or_file.clone(),
         new: args.new.clone(),
         revision: args.revision.clone(),
+        root: args.root.clone(),
+        old_root: args.old_root.clone(),
         output: args.output.clone(),
         log_modifications: args.log_modifications.clone(),
         compact_substitutions: args.compact_substitutions,
@@ -342,11 +353,15 @@ fn debug_args(args: &Args) -> debug::DebugArgs {
     }
 }
 
-/// Absolute paths to the two documents to diff, plus an optional temp directory that
-/// must stay alive until rendering is done (the `--revision` Git snapshot lives there).
+/// Absolute paths to the two documents to diff and their project roots, plus an
+/// optional temp directory that must stay alive until rendering is done (the
+/// `--revision` Git snapshot lives there).
 struct ResolvedInputs {
     old: PathBuf,
     new: PathBuf,
+    /// `None` roots each document at its own directory.
+    old_root: Option<PathBuf>,
+    new_root: Option<PathBuf>,
     _snapshot: Option<TempDir>,
 }
 
@@ -356,7 +371,9 @@ struct ResolvedInputs {
 /// be present.
 fn resolve_inputs(args: &Args) -> Result<ResolvedInputs> {
     match (&args.revision, &args.new) {
-        (Some(revision), None) => resolve_git_inputs(&args.old_or_file, revision),
+        (Some(revision), None) => {
+            resolve_git_inputs(&args.old_or_file, revision, args.root.as_deref())
+        }
         (Some(_), Some(_)) => {
             bail!(
                 "--revision expects exactly one file argument, e.g. typst-diff main.typ --revision HEAD"
@@ -365,6 +382,8 @@ fn resolve_inputs(args: &Args) -> Result<ResolvedInputs> {
         (None, Some(new)) => Ok(ResolvedInputs {
             old: args.old_or_file.clone(),
             new: new.clone(),
+            old_root: args.old_root.clone().or_else(|| args.root.clone()),
+            new_root: args.root.clone(),
             _snapshot: None,
         }),
         (None, None) => {
@@ -378,8 +397,13 @@ fn resolve_inputs(args: &Args) -> Result<ResolvedInputs> {
 ///
 /// The full repo snapshot (via `git archive | tar`) is needed rather than a single-file
 /// checkout so that `#include` directives in the Typst source resolve correctly relative
-/// to the snapshot root.
-fn resolve_git_inputs(file: &PathBuf, revision: &str) -> Result<ResolvedInputs> {
+/// to the snapshot root. A project `root` must lie inside the repository; the old
+/// document uses the same directory of the snapshot.
+fn resolve_git_inputs(
+    file: &PathBuf,
+    revision: &str,
+    root: Option<&std::path::Path>,
+) -> Result<ResolvedInputs> {
     let working_file = file
         .canonicalize()
         .with_context(|| format!("cannot find working-tree file {:?}", file))?;
@@ -398,6 +422,19 @@ fn resolve_git_inputs(file: &PathBuf, revision: &str) -> Result<ResolvedInputs> 
         "Creating snapshot of Git revision {revision} for {}...",
         relative_file.display()
     );
+    let relative_root = root
+        .map(|root| {
+            let root = root
+                .canonicalize()
+                .with_context(|| format!("cannot find root directory {root:?}"))?;
+            let relative = root
+                .strip_prefix(&git_root)
+                .with_context(|| format!("root {root:?} is not inside Git root {git_root:?}"))?
+                .to_owned();
+            Ok::<_, anyhow::Error>((root, relative))
+        })
+        .transpose()?;
+
     let snapshot = archive_revision(&git_root, revision)?;
     let old_file = snapshot.path().join(relative_file);
 
@@ -408,9 +445,16 @@ fn resolve_git_inputs(file: &PathBuf, revision: &str) -> Result<ResolvedInputs> 
         );
     }
 
+    let (old_root, new_root) = match relative_root {
+        Some((root, relative)) => (Some(snapshot.path().join(relative)), Some(root)),
+        None => (None, None),
+    };
+
     Ok(ResolvedInputs {
         old: old_file,
         new: working_file,
+        old_root,
+        new_root,
         _snapshot: Some(snapshot),
     })
 }

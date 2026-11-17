@@ -46,6 +46,8 @@ pub struct DebugArgs {
     pub old_or_file: PathBuf,
     pub new: Option<PathBuf>,
     pub revision: Option<String>,
+    pub root: Option<PathBuf>,
+    pub old_root: Option<PathBuf>,
     pub output: PathBuf,
     pub log_modifications: Option<PathBuf>,
     pub compact_substitutions: bool,
@@ -394,6 +396,8 @@ struct ManifestArgs {
     old_or_file: String,
     new: Option<String>,
     revision: Option<String>,
+    root: Option<String>,
+    old_root: Option<String>,
     output: String,
     log_modifications: Option<String>,
     compact_substitutions: bool,
@@ -422,6 +426,8 @@ fn manifest(bundle: &DebugBundle<'_>) -> Manifest {
             old_or_file: path_string(&bundle.args.old_or_file),
             new: bundle.args.new.as_ref().map(|path| path_string(path)),
             revision: bundle.args.revision.clone(),
+            root: bundle.args.root.as_ref().map(|path| path_string(path)),
+            old_root: bundle.args.old_root.as_ref().map(|path| path_string(path)),
             output: path_string(&bundle.args.output),
             log_modifications: bundle
                 .args

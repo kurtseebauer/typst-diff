@@ -256,3 +256,11 @@ Tradeoff: a marker sits where a change starts. A changed run that begins at the 
 - The rules are deliberately not put on a style wrapper around the realized root: that wrapper changes how the root's children are annotated (the root path materializes style-dependent fields), and after a changed title page a changed table became an opaque replacement.
 
 Tradeoff: the PDF metadata is always that of the new document; a change of title or keywords does not appear in the diff body.
+
+## Project Root Follows `typst compile --root`
+
+- `SystemWorld::with_root` takes an optional project root; the entry file must lie inside it and its virtual path is its path below the root. `SystemWorld::new` keeps the old behavior (root = the entry file's directory).
+- `--root` applies to both documents. In `--revision` mode the root must lie inside the Git repository, and the old document uses the same relative directory of the snapshot, so templates and assets are read from the old revision too.
+- `--old-root` overrides the old document's root for two separate checkouts. It conflicts with `--revision`, where the snapshot root is derived.
+
+Tradeoff: there is no implicit root search (for example the Git root); like Typst, the default stays the entry file's directory.
